@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__resonance-hybrid__recall",
+      "mcp__resonance-hybrid__get_memory",
+      "Read(/D:\\Repos\\Ensemble.Maestro/**)",
+      "Read(/D:\\Repos\\Ensemble.Maestro/**)",
+      "Read(/D:\\Repos\\Ensemble.Maestro/**)",
+      "Read(/D:\\Repos\\Ensemble.Maestro\\src\\core\\models/**)",
+      "Read(/D:\\Repos\\Ensemble.Maestro\\src\\core\\models/**)",
+      "Read(/D:\\Repos\\Ensemble.Maestro\\src\\core\\orchestration/**)",
+      "Read(/D:\\Repos\\Ensemble.Maestro\\src\\design\\backend/**)",
+      "Read(/D:\\Repos\\Ensemble.Maestro\\src\\mcp\\tools/**)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__get-library-docs"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
