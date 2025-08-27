@@ -48,6 +48,7 @@ public class DesignerOutputStorageResult
     public Guid? DesignerOutputId { get; set; }
     public int FunctionSpecificationsStored { get; set; }
     public int CodeUnitsStored { get; set; }
+    public int CodeUnitAssignmentsSent { get; set; }
     public List<string> Warnings { get; set; } = new();
 }
 

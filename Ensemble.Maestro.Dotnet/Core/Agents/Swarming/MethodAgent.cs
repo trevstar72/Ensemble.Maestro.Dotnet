@@ -6,9 +6,10 @@ namespace Ensemble.Maestro.Dotnet.Core.Agents.Swarming;
 
 /// <summary>
 /// Specialized agent for implementing a single function/method with high focus and quality
-/// Method Agents are spawned by Code Unit Controllers for complex functions that require dedicated attention
+/// Method Agents are spawned by Code Unit Controller Service (CUCS) for individual function implementation
+/// Produces individual code documents (not monolithic reports) for CUCS collection
 /// </summary>
-public class MethodAgent : BaseAgent
+public class MethodAgent : BaseAgent, IMethodAgent
 {
     private readonly IMessageCoordinatorService _messageCoordinator;
     private readonly ISwarmConfigurationService _swarmConfig;
@@ -313,7 +314,8 @@ Target Language: {context.TargetLanguage}";
     }
 
     /// <summary>
-    /// Create comprehensive final output
+    /// Create individual code document output (not monolithic report)
+    /// This now produces individual code documents as required by CUCS architecture
     /// </summary>
     private async Task<string> CreateFinalOutputAsync(
         AgentExecutionContext context,
@@ -323,54 +325,13 @@ Target Language: {context.TargetLanguage}";
         AgentExecutionResult validation,
         CancellationToken cancellationToken)
     {
-        var functionId = context.Metadata["FunctionId"].ToString();
-        var complexityRating = context.Metadata.GetValueOrDefault("ComplexityRating", 5);
+        var functionName = context.Metadata.ContainsKey("FunctionName") 
+            ? context.Metadata["FunctionName"].ToString()
+            : context.Metadata.GetValueOrDefault("FunctionId", "UnknownFunction").ToString();
 
-        var output = new List<string>
-        {
-            "# Method Agent Implementation Report",
-            "",
-            $"**Function ID**: {functionId}",
-            $"**Complexity Rating**: {complexityRating}/10",
-            $"**Target Language**: {context.TargetLanguage}",
-            $"**Execution Time**: {(DateTime.UtcNow - context.StartTime).TotalSeconds:F1}s",
-            "",
-            "## Function Implementation",
-            "",
-            "```" + context.TargetLanguage?.ToLower(),
-            implementation.OutputResponse,
-            "```",
-            "",
-            "## Implementation Analysis",
-            "",
-            analysis.OutputResponse,
-            "",
-            "## Design Approach",
-            "",
-            design.OutputResponse,
-            ""
-        };
-
-        if (validation.Success)
-        {
-            output.Add("## Validation Results");
-            output.Add("");
-            output.Add(validation.OutputResponse);
-            output.Add("");
-        }
-
-        output.Add("## Execution Summary");
-        output.Add("");
-        output.Add($"- **Total Tokens Used**: {analysis.InputTokens + design.InputTokens + implementation.InputTokens + validation.InputTokens} input, {analysis.OutputTokens + design.OutputTokens + implementation.OutputTokens + validation.OutputTokens} output");
-        output.Add($"- **Total Cost**: ${(analysis.ExecutionCost + design.ExecutionCost + implementation.ExecutionCost + validation.ExecutionCost):F4}");
-        output.Add($"- **Quality Score**: {AnalyzeImplementationQuality(implementation.OutputResponse, context, Convert.ToInt32(complexityRating)).quality}/100");
-        output.Add($"- **Validation Status**: {(validation.Success ? "PASSED" : "FAILED")}");
-        output.Add("");
-        output.Add("## Ready for Integration");
-        output.Add("");
-        output.Add("This function implementation is complete and ready for integration into the code unit.");
-
-        return string.Join("\n", output);
+        // Return only the clean implementation code as individual document
+        // This allows the CUCS to collect individual code documents rather than monolithic reports
+        return implementation.OutputResponse;
     }
 
     /// <summary>
@@ -481,5 +442,53 @@ Target Language: {context.TargetLanguage}";
         var complexityTime = complexityRating * 30; // 30 seconds per complexity point
         
         return baseTime + complexityTime;
+    }
+
+    /// <summary>
+    /// Execute with MethodJobPacket (IMethodAgent interface implementation)
+    /// This allows CUCS to call MethodAgent with job packets
+    /// </summary>
+    public async Task<AgentExecutionResult> ExecuteAsync(MethodJobPacket jobPacket)
+    {
+        // Convert MethodJobPacket to AgentExecutionContext for compatibility
+        var context = new AgentExecutionContext
+        {
+            InputPrompt = $@"Implement the following function:
+
+Function Name: {jobPacket.Function.Name}
+Return Type: {jobPacket.Function.ReturnType}
+Parameters: {string.Join(", ", jobPacket.Function.Parameters?.Select(p => $"{p.Type} {p.Name}") ?? new string[0])}
+Access Modifier: {jobPacket.Function.AccessModifier}
+Is Static: {jobPacket.Function.IsStatic}
+Is Async: {jobPacket.Function.IsAsync}
+
+Function Description: {jobPacket.Function.Description}
+
+Requirements:
+- Follow best practices for {jobPacket.Function.ReturnType} functions
+- Include proper error handling and validation
+- Add meaningful comments
+- Ensure the implementation is production-ready",
+            
+            ProjectId = Guid.Parse(jobPacket.ProjectId),
+            PipelineExecutionId = Guid.NewGuid(),
+            ExecutionId = Guid.Parse(jobPacket.JobId),
+            TargetLanguage = "C#",
+            MaxTokens = 4000,
+            Temperature = 0.3f,
+            Metadata = new Dictionary<string, object>
+            {
+                ["FunctionId"] = jobPacket.JobId,
+                ["FunctionName"] = jobPacket.Function.Name,
+                ["CodeUnitId"] = jobPacket.CodeUnitName,
+                ["CodeUnitName"] = jobPacket.CodeUnitName,
+                ["ComplexityRating"] = jobPacket.Context.GetValueOrDefault("functionComplexity", 5),
+                ["Priority"] = jobPacket.Priority
+            },
+            StartTime = DateTime.UtcNow
+        };
+
+        // Execute using the standard execution flow
+        return await ExecuteAsync(context, CancellationToken.None);
     }
 }

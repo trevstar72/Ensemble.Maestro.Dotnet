@@ -3,6 +3,7 @@ using Ensemble.Maestro.Dotnet.Core.Data;
 using Ensemble.Maestro.Dotnet.Core.Data.Repositories;
 using Ensemble.Maestro.Dotnet.Core.Services;
 using Ensemble.Maestro.Dotnet.Core.Agents;
+using Ensemble.Maestro.Dotnet.Core.Agents.Building;
 using Ensemble.Maestro.Dotnet.Core.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.SemanticKernel;
@@ -74,6 +75,19 @@ builder.Services.AddScoped<IMessageCoordinatorService, MessageCoordinatorService
 
 // Add Swarm Configuration service
 builder.Services.AddScoped<ISwarmConfigurationService, SwarmConfigurationService>();
+
+// Add Code Unit Controller services
+builder.Services.AddScoped<CodeUnitControllerService>();
+
+// Add Code Document Storage service
+builder.Services.AddSingleton<ICodeDocumentStorageService, CodeDocumentStorageService>();
+
+// Add Build Execution service
+builder.Services.AddScoped<IBuildExecutionService, BuildExecutionService>();
+
+// Add Enhanced Builder Agent
+builder.Services.AddScoped<EnhancedBuilderAgent>();
+builder.Services.AddHostedService<CodeUnitControllerHostedService>();
 
 // Configure SwarmConfiguration from appsettings
 builder.Services.Configure<SwarmConfiguration>(

@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Ensemble.Maestro.Dotnet.Core.Agents;
 using Ensemble.Maestro.Dotnet.Core.Data;
 using Ensemble.Maestro.Dotnet.Core.Data.Entities;
+using Ensemble.Maestro.Dotnet.Core.Messages;
 using Microsoft.Extensions.Logging;
 
 namespace Ensemble.Maestro.Dotnet.Core.Services;
@@ -17,6 +18,7 @@ public class DesignerOutputStorageService : IDesignerOutputStorageService
     private readonly INeo4jService _neo4jService;
     private readonly IElasticsearchService _elasticsearchService;
     private readonly ILLMService _llmService;
+    private readonly IMessageCoordinatorService _messageCoordinatorService;
     private readonly ILogger<DesignerOutputStorageService> _logger;
 
     public DesignerOutputStorageService(
@@ -25,6 +27,7 @@ public class DesignerOutputStorageService : IDesignerOutputStorageService
         INeo4jService neo4jService,
         IElasticsearchService elasticsearchService,
         ILLMService llmService,
+        IMessageCoordinatorService messageCoordinatorService,
         ILogger<DesignerOutputStorageService> logger)
     {
         _dbContext = dbContext;
@@ -32,6 +35,7 @@ public class DesignerOutputStorageService : IDesignerOutputStorageService
         _neo4jService = neo4jService;
         _elasticsearchService = elasticsearchService;
         _llmService = llmService;
+        _messageCoordinatorService = messageCoordinatorService;
         _logger = logger;
     }
 
@@ -214,10 +218,15 @@ public class DesignerOutputStorageService : IDesignerOutputStorageService
             crossRef.SqlId = designerOutput.Id;
             await _crossReferenceService.UpdateCrossReferenceAsync(crossRef.PrimaryId, crossRef, cancellationToken);
 
+            // 11. Generate and send CodeUnitAssignmentMessages to CUCS
+            var assignmentResult = await GenerateAndSendCodeUnitAssignmentsAsync(
+                storedCodeUnits, storedFunctionSpecs, context, cancellationToken);
+
             storageResult.Success = true;
+            storageResult.CodeUnitAssignmentsSent = assignmentResult.assignmentsSent;
             
-            _logger.LogInformation("Successfully stored designer output: {FunctionSpecs} function specs, {CodeUnits} code units", 
-                storageResult.FunctionSpecificationsStored, storageResult.CodeUnitsStored);
+            _logger.LogInformation("Successfully stored designer output: {FunctionSpecs} function specs, {CodeUnits} code units, {Assignments} CUCS assignments sent", 
+                storageResult.FunctionSpecificationsStored, storageResult.CodeUnitsStored, storageResult.CodeUnitAssignmentsSent);
 
             return storageResult;
         }
@@ -577,6 +586,106 @@ Designer Output:
         };
 
         return $"{folder}{unit.Name}{extension}";
+    }
+
+    /// <summary>
+    /// Generates CodeUnitAssignmentMessages from parsed code units and sends them to CUCS queue
+    /// </summary>
+    private async Task<(int assignmentsSent, List<string> errors)> GenerateAndSendCodeUnitAssignmentsAsync(
+        List<CodeUnit> codeUnits,
+        List<FunctionSpecification> functionSpecs,
+        AgentExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var assignmentsSent = 0;
+        var errors = new List<string>();
+
+        try
+        {
+            foreach (var codeUnit in codeUnits)
+            {
+                // Get function specifications for this code unit
+                var unitFunctionSpecs = functionSpecs
+                    .Where(fs => fs.CodeUnit == codeUnit.Name)
+                    .ToList();
+
+                if (!unitFunctionSpecs.Any())
+                {
+                    _logger.LogWarning("No function specifications found for code unit {CodeUnit}", codeUnit.Name);
+                    continue;
+                }
+
+                // Create function assignment messages
+                var functionAssignments = unitFunctionSpecs.Select(fs => new FunctionAssignmentMessage
+                {
+                    AssignmentId = Guid.NewGuid().ToString("N"),
+                    FunctionSpecificationId = fs.Id.ToString(),
+                    FunctionName = fs.FunctionName,
+                    CodeUnit = fs.CodeUnit,
+                    Signature = fs.Signature ?? "",
+                    Description = fs.Description ?? "",
+                    BusinessLogic = fs.BusinessLogic,
+                    ValidationRules = fs.ValidationRules,
+                    ErrorHandling = fs.ErrorHandling,
+                    SecurityConsiderations = fs.SecurityConsiderations,
+                    TestCases = fs.TestCases,
+                    ComplexityRating = fs.ComplexityRating,
+                    EstimatedMinutes = fs.EstimatedMinutes ?? 30,
+                    Priority = fs.Priority ?? "Medium",
+                    TargetLanguage = context.TargetLanguage ?? "CSharp",
+                    AssignedAt = DateTime.UtcNow,
+                    DueAt = DateTime.UtcNow.AddHours(2)
+                }).ToList();
+
+                // Create code unit assignment message
+                var assignment = new CodeUnitAssignmentMessage
+                {
+                    AssignmentId = Guid.NewGuid().ToString("N"),
+                    CodeUnitId = codeUnit.Id.ToString(),
+                    Name = codeUnit.Name,
+                    UnitType = codeUnit.UnitType,
+                    Namespace = codeUnit.Namespace,
+                    Description = codeUnit.Description,
+                    Functions = functionAssignments,
+                    SimpleFunctionCount = codeUnit.SimpleFunctionCount,
+                    ComplexFunctionCount = codeUnit.ComplexFunctionCount,
+                    Dependencies = codeUnit.Dependencies,
+                    Patterns = codeUnit.Patterns,
+                    TestingStrategy = codeUnit.TestingStrategy,
+                    ComplexityRating = codeUnit.ComplexityRating,
+                    EstimatedMinutes = codeUnit.EstimatedMinutes ?? 60,
+                    Priority = codeUnit.Priority ?? "Medium",
+                    TargetLanguage = context.TargetLanguage ?? "CSharp",
+                    AssignedAt = DateTime.UtcNow,
+                    DueAt = DateTime.UtcNow.AddHours(4)
+                };
+
+                // Send to CUCS queue
+                var success = await _messageCoordinatorService.SendCodeUnitAssignmentAsync(
+                    assignment, cancellationToken);
+
+                if (success)
+                {
+                    assignmentsSent++;
+                    _logger.LogInformation("Sent CodeUnitAssignment for {CodeUnit} with {FunctionCount} functions to CUCS queue",
+                        codeUnit.Name, functionAssignments.Count);
+                }
+                else
+                {
+                    var error = $"Failed to send CodeUnitAssignment for {codeUnit.Name} to CUCS queue";
+                    errors.Add(error);
+                    _logger.LogError(error);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            var error = $"Failed to generate and send CodeUnitAssignments: {ex.Message}";
+            errors.Add(error);
+            _logger.LogError(ex, "Failed to generate and send CodeUnitAssignments");
+        }
+
+        return (assignmentsSent, errors);
     }
 
     #endregion

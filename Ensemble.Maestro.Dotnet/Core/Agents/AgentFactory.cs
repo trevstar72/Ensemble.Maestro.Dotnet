@@ -20,7 +20,7 @@ public class AgentFactory : IAgentFactory
     {
         { "Planning", new[] { "Planner", "Architect", "Analyst" } },
         { "Designing", new[] { "Designer", "UIDesigner", "APIDesigner" } },
-        { "Swarming", new[] { "CodeUnitController", "MethodAgent" } },
+        { "Swarming", new[] { "MethodAgent" } },
         { "Building", new[] { "Builder", "CodeGenerator", "Compiler" } },
         { "Validating", new[] { "Validator", "Tester", "QualityAssurance" } }
     };
@@ -38,11 +38,11 @@ public class AgentFactory : IAgentFactory
         { "APIDesigner", typeof(APIDesignerAgent) },
         
         // Swarming agents
-        { "CodeUnitController", typeof(CodeUnitControllerAgent) },
         { "MethodAgent", typeof(MethodAgent) },
         
         // Building agents
         { "Builder", typeof(BuilderAgent) },
+        { "EnhancedBuilder", typeof(EnhancedBuilderAgent) },
         { "CodeGenerator", typeof(CodeGeneratorAgent) },
         { "Compiler", typeof(CompilerAgent) },
         
@@ -89,14 +89,7 @@ public class AgentFactory : IAgentFactory
                 var messageCoordinator = _serviceProvider.GetRequiredService<IMessageCoordinatorService>();
                 var swarmConfig = _serviceProvider.GetRequiredService<ISwarmConfigurationService>();
                 
-                if (agentType == "CodeUnitController")
-                {
-                    var agentFactory = _serviceProvider.GetRequiredService<IAgentFactory>();
-                    var crossReference = _serviceProvider.GetRequiredService<ICrossReferenceService>();
-                    agent = (IAgent)Activator.CreateInstance(agentTypeClass, logger, llmService, 
-                        messageCoordinator, swarmConfig, agentFactory, crossReference)!;
-                }
-                else if (agentType == "MethodAgent")
+                if (agentType == "MethodAgent")
                 {
                     agent = (IAgent)Activator.CreateInstance(agentTypeClass, logger, llmService, 
                         messageCoordinator, swarmConfig)!;
@@ -106,6 +99,16 @@ public class AgentFactory : IAgentFactory
                     // Legacy swarm agents use standard constructor
                     agent = (IAgent)Activator.CreateInstance(agentTypeClass, logger, llmService)!;
                 }
+            }
+            else if (IsEnhancedBuilderAgent(agentType))
+            {
+                // Enhanced Builder agent needs additional services
+                var codeDocumentStorageService = _serviceProvider.GetRequiredService<ICodeDocumentStorageService>();
+                var messageCoordinatorService = _serviceProvider.GetRequiredService<IMessageCoordinatorService>();
+                var buildExecutionService = _serviceProvider.GetRequiredService<IBuildExecutionService>();
+                
+                agent = (IAgent)Activator.CreateInstance(agentTypeClass, logger, llmService, 
+                    codeDocumentStorageService, messageCoordinatorService, buildExecutionService)!;
             }
             else
             {
@@ -180,6 +183,14 @@ public class AgentFactory : IAgentFactory
     /// </summary>
     private static bool IsSwarmAgent(string agentType)
     {
-        return agentType == "CodeUnitController" || agentType == "MethodAgent";
+        return agentType == "MethodAgent";
+    }
+    
+    /// <summary>
+    /// Determines if an agent type requires Enhanced Builder dependencies
+    /// </summary>
+    private static bool IsEnhancedBuilderAgent(string agentType)
+    {
+        return agentType == "EnhancedBuilder";
     }
 }
