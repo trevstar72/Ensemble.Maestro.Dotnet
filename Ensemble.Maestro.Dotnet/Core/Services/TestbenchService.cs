@@ -2,6 +2,7 @@ using System.Text.Json;
 using Ensemble.Maestro.Dotnet.Core.Data;
 using Ensemble.Maestro.Dotnet.Core.Data.Entities;
 using Ensemble.Maestro.Dotnet.Core.Data.Repositories;
+using Ensemble.Maestro.Dotnet.Core.Agents;
 using Microsoft.EntityFrameworkCore;
 
 namespace Ensemble.Maestro.Dotnet.Core.Services;
@@ -53,6 +54,11 @@ public class TestbenchService
             projectId = project.Id;
         }
 
+        // Calculate total functions based on agent types across all stages
+        var totalAgentCount = new[] { "Planning", "Designing", "Swarming", "Building", "Validating" }
+            .SelectMany(stage => GetAgentTypesForStage(stage))
+            .Count();
+
         var pipeline = new PipelineExecution
         {
             ProjectId = projectId,
@@ -62,13 +68,22 @@ public class TestbenchService
             DeploymentTarget = config.DeploymentTarget,
             AgentPoolSize = config.AgentPoolSize,
             EstimatedDurationSeconds = config.EstimatedDurationSeconds,
+            TotalFunctions = totalAgentCount,
+            CompletedFunctions = 0,
+            FailedFunctions = 0,
             ExecutionConfig = JsonSerializer.Serialize(config)
         };
 
         await _pipelineExecutionRepository.AddAsync(pipeline);
         await _pipelineExecutionRepository.SaveChangesAsync();
 
-        _ = Task.Run(() => ExecutePipelineAsync(pipeline.Id, config));
+        // Fix: Update config with the correct project ID before passing to pipeline execution
+        var updatedConfig = config with { ProjectId = projectId };
+        
+        _logger.LogInformation("Starting pipeline execution {PipelineId} for project {ProjectId} with {TotalAgents} total agents", 
+            pipeline.Id, projectId, totalAgentCount);
+
+        _ = Task.Run(() => ExecutePipelineAsync(pipeline.Id, updatedConfig));
 
         return pipeline;
     }
@@ -146,10 +161,10 @@ public class TestbenchService
         var totalAgentExecutions = await dbContext.AgentExecutions.CountAsync();
         var totalTokens = await dbContext.AgentExecutions
             .Where(a => a.TotalTokens.HasValue)
-            .SumAsync(a => a.TotalTokens.Value);
+            .SumAsync(a => a.TotalTokens!.Value);
         var totalCost = await dbContext.AgentExecutions
             .Where(a => a.ExecutionCost.HasValue)
-            .SumAsync(a => a.ExecutionCost.Value);
+            .SumAsync(a => a.ExecutionCost!.Value);
 
         var avgExecutionTime = await dbContext.PipelineExecutions
             .Where(p => p.ActualDurationSeconds.HasValue)
@@ -238,8 +253,8 @@ public class TestbenchService
         dbContext.StageExecutions.Add(stageExecution);
         await dbContext.SaveChangesAsync();
 
-        // Simulate stage execution with mock agent calls
-        await SimulateStageExecution(pipelineId, stageExecution.Id, stageName, config);
+        // Execute real agents for the stage
+        await ExecuteStageAgents(pipelineId, stageExecution.Id, stageName, config);
 
         stageExecution.Status = "Completed";
         stageExecution.CompletedAt = DateTime.UtcNow;
@@ -250,52 +265,78 @@ public class TestbenchService
         await dbContext.SaveChangesAsync();
     }
 
-    private async Task SimulateStageExecution(Guid pipelineId, Guid stageId, string stageName, TestConfiguration config)
+    private async Task ExecuteStageAgents(Guid pipelineId, Guid stageId, string stageName, TestConfiguration config)
     {
+        _logger.LogInformation("=== Starting stage {StageName} execution ===", stageName);
+        _logger.LogInformation("Pipeline: {PipelineId}, Stage: {StageId}, Project: {ProjectId}", 
+            pipelineId, stageId, config.ProjectId);
+            
         using var scope = _serviceScopeFactory.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<MaestroDbContext>();
+        var agentExecutionService = scope.ServiceProvider.GetRequiredService<AgentExecutionService>();
         
-        var agentTypes = GetAgentTypesForStage(stageName);
-        var random = new Random();
-
-        foreach (var agentType in agentTypes)
+        // Validate configuration
+        if (config.ProjectId == Guid.Empty)
         {
-            var agentExecution = new AgentExecution
-            {
-                ProjectId = config.ProjectId,
-                PipelineExecutionId = pipelineId,
-                StageExecutionId = stageId,
-                AgentType = agentType,
-                AgentName = $"{agentType}Agent",
-                Status = "Running",
-                InputPrompt = $"Execute {stageName} stage with {agentType} specialization",
-                Priority = "Medium",
-                ModelUsed = "gpt-4o",
-                Temperature = 0.7f,
-                MaxTokens = 4000
-            };
-
-            dbContext.AgentExecutions.Add(agentExecution);
-            await dbContext.SaveChangesAsync();
-
-            // Simulate processing time
-            await Task.Delay(random.Next(1000, 3000));
-
-            // Complete the agent execution
-            agentExecution.Status = "Completed";
-            agentExecution.CompletedAt = DateTime.UtcNow;
-            agentExecution.DurationSeconds = (int)(DateTime.UtcNow - agentExecution.StartedAt).TotalSeconds;
-            agentExecution.OutputResponse = $"Successfully completed {stageName} stage processing";
-            agentExecution.InputTokens = random.Next(500, 1500);
-            agentExecution.OutputTokens = random.Next(200, 800);
-            agentExecution.TotalTokens = agentExecution.InputTokens + agentExecution.OutputTokens;
-            agentExecution.ExecutionCost = agentExecution.TotalTokens * 0.00002m; // Simulate cost
-            agentExecution.QualityScore = random.Next(80, 95);
-            agentExecution.ConfidenceScore = random.Next(75, 90);
-
-            dbContext.Update(agentExecution);
-            await dbContext.SaveChangesAsync();
+            _logger.LogError("CRITICAL: ProjectId is Empty for stage {StageName}! This will cause agent validation failures.", stageName);
         }
+        
+        // Create execution context
+        var context = new AgentExecutionContext
+        {
+            ProjectId = config.ProjectId,
+            PipelineExecutionId = pipelineId,
+            StageExecutionId = stageId,
+            Stage = stageName,
+            InputPrompt = $"Execute {stageName} stage for project with requirements: {GetStageRequirements(stageName)}",
+            TargetLanguage = config.TargetLanguage,
+            DeploymentTarget = config.DeploymentTarget,
+            AgentPoolSize = config.AgentPoolSize,
+            Parameters = config.Parameters ?? new Dictionary<string, object>()
+        };
+
+        _logger.LogInformation("Context created - ProjectId: {ProjectId}, InputPrompt: {InputPrompt}", 
+            context.ProjectId, context.InputPrompt);
+
+        try
+        {
+            // Special handling for Swarming stage - spawn Code Unit Controllers dynamically
+            if (stageName == "Swarming")
+            {
+                await ExecuteSwarmStageAsync(pipelineId, stageId, config);
+            }
+            else
+            {
+                // Execute all agents for this stage using traditional method
+                var executions = await agentExecutionService.ExecuteStageAgentsAsync(
+                    config.ProjectId,
+                    pipelineId,
+                    stageId,
+                    stageName,
+                    context.InputPrompt,
+                    context);
+                
+                _logger.LogInformation("Stage {StageName} completed with {ExecutionCount} agent executions", 
+                    stageName, executions?.Count ?? 0);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Stage {StageName} execution failed with error: {ErrorMessage}", stageName, ex.Message);
+            throw;
+        }
+    }
+    
+    private string GetStageRequirements(string stageName)
+    {
+        return stageName switch
+        {
+            "Planning" => "Analyze requirements, create project plan, design system architecture, and assess technical feasibility",
+            "Designing" => "Create detailed system design, UI/UX specifications, and API documentation",
+            "Swarming" => "Coordinate agent execution, distribute tasks efficiently, and monitor swarm performance",
+            "Building" => "Generate source code, compile binaries, and create deployment packages",
+            "Validating" => "Validate system quality, execute comprehensive tests, and perform quality assurance",
+            _ => "Execute stage-specific tasks with high quality and reliability"
+        };
     }
 
     private async Task CompletePipelineAsync(Guid pipelineId)
@@ -328,17 +369,118 @@ public class TestbenchService
         await _pipelineExecutionRepository.SaveChangesAsync();
     }
 
+    /// <summary>
+    /// Execute Swarming stage by spawning Code Unit Controllers based on Designer output
+    /// </summary>
+    private async Task ExecuteSwarmStageAsync(Guid pipelineId, Guid stageId, TestConfiguration config)
+    {
+        _logger.LogInformation("=== Starting Swarming stage with Code Unit Controller spawning ===");
+        _logger.LogInformation("Pipeline: {PipelineId}, Stage: {StageId}, Project: {ProjectId}", 
+            pipelineId, stageId, config.ProjectId);
+
+        using var scope = _serviceScopeFactory.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MaestroDbContext>();
+        var messageCoordinatorService = scope.ServiceProvider.GetRequiredService<IMessageCoordinatorService>();
+
+        try
+        {
+            // Step 1: Query function specifications from Designer stage output
+            _logger.LogInformation("Querying function specifications from Designer output for pipeline {PipelineId}", pipelineId);
+            
+            var functionSpecs = await dbContext.FunctionSpecifications
+                .Where(fs => fs.PipelineExecutionId == pipelineId)
+                .ToListAsync();
+
+            if (functionSpecs.Count == 0)
+            {
+                _logger.LogWarning("No function specifications found for pipeline {PipelineId}. Swarming stage will complete immediately.", pipelineId);
+                return;
+            }
+
+            _logger.LogInformation("Found {SpecCount} function specifications to process", functionSpecs.Count);
+
+            // Step 2: Group specifications by CodeUnit (UserController, ProductController, etc.)
+            var codeUnitGroups = functionSpecs
+                .GroupBy(fs => fs.CodeUnit)
+                .Where(g => !string.IsNullOrEmpty(g.Key))
+                .ToList();
+
+            _logger.LogInformation("Grouped specifications into {GroupCount} code units: [{CodeUnits}]", 
+                codeUnitGroups.Count, 
+                string.Join(", ", codeUnitGroups.Select(g => g.Key)));
+
+            // Step 3: Send CodeUnitAssignmentMessage for each group via MessageCoordinatorService
+            foreach (var codeUnitGroup in codeUnitGroups)
+            {
+                var codeUnitName = codeUnitGroup.Key!;
+                var functions = codeUnitGroup.ToList();
+
+                _logger.LogInformation("Spawning Code Unit Controller for {CodeUnitName} with {FunctionCount} functions", 
+                    codeUnitName, functions.Count);
+
+                // Create CodeUnitAssignmentMessage with function specifications
+                var assignment = new Core.Messages.CodeUnitAssignmentMessage
+                {
+                    AssignmentId = Guid.NewGuid().ToString("N"),
+                    CodeUnitId = Guid.NewGuid().ToString("N"),
+                    Name = codeUnitName,
+                    UnitType = "Controller", // Default type, could be enhanced later
+                    Namespace = functions.FirstOrDefault()?.Namespace,
+                    Description = $"Code unit controller for {codeUnitName} with {functions.Count} functions",
+                    
+                    // Convert FunctionSpecifications to FunctionAssignmentMessages
+                    Functions = functions.Select(fs => new Core.Messages.FunctionAssignmentMessage
+                    {
+                        FunctionSpecificationId = fs.Id.ToString(),
+                        FunctionName = fs.FunctionName,
+                        CodeUnit = fs.CodeUnit,
+                        Signature = fs.Signature,
+                        Description = fs.Description,
+                        BusinessLogic = fs.BusinessLogic,
+                        ValidationRules = fs.ValidationRules,
+                        ErrorHandling = fs.ErrorHandling,
+                        SecurityConsiderations = fs.SecurityConsiderations,
+                        TestCases = fs.TestCases,
+                        ComplexityRating = fs.ComplexityRating,
+                        EstimatedMinutes = fs.EstimatedMinutes ?? 15,
+                        Priority = fs.Priority,
+                        TargetLanguage = fs.Language ?? config.TargetLanguage ?? "CSharp"
+                    }).ToList(),
+                    
+                    SimpleFunctionCount = functions.Count(f => f.ComplexityRating < 4),
+                    ComplexFunctionCount = functions.Count(f => f.ComplexityRating >= 7),
+                    ComplexityRating = (int)functions.Average(f => f.ComplexityRating),
+                    EstimatedMinutes = functions.Sum(f => f.EstimatedMinutes ?? 15),
+                    Priority = "High",
+                    TargetLanguage = config.TargetLanguage ?? "CSharp"
+                };
+
+                // Send the assignment message to spawn the Code Unit Controller
+                var success = await messageCoordinatorService.SendCodeUnitAssignmentAsync(assignment);
+                
+                if (success)
+                {
+                    _logger.LogInformation("Successfully sent Code Unit Controller assignment for {CodeUnitName}", codeUnitName);
+                }
+                else
+                {
+                    _logger.LogError("Failed to send Code Unit Controller assignment for {CodeUnitName}", codeUnitName);
+                }
+            }
+
+            _logger.LogInformation("=== Swarming stage initialization completed. Spawned {ControllerCount} Code Unit Controllers ===", 
+                codeUnitGroups.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Swarming stage execution failed: {ErrorMessage}", ex.Message);
+            throw;
+        }
+    }
+
     private static string[] GetAgentTypesForStage(string stageName)
     {
-        return stageName switch
-        {
-            "Planning" => new[] { "Planner", "Architect", "Analyst" },
-            "Designing" => new[] { "Designer", "UIDesigner", "APIDesigner" },
-            "Swarming" => new[] { "Coordinator", "Distributor", "Monitor" },
-            "Building" => new[] { "Builder", "CodeGenerator", "Compiler" },
-            "Validating" => new[] { "Validator", "Tester", "QualityAssurance" },
-            _ => new[] { "GenericAgent" }
-        };
+        return AgentFactory.GetAgentTypesForStage(stageName);
     }
 }
 

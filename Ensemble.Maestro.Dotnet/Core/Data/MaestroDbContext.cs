@@ -23,6 +23,14 @@ public class MaestroDbContext : DbContext
     public DbSet<AgentExecution> AgentExecutions { get; set; } = null!;
     public DbSet<AgentMessage> AgentMessages { get; set; } = null!;
     public DbSet<OrchestrationResult> OrchestrationResults { get; set; } = null!;
+    
+    // Cross-database coordination entities
+    public DbSet<CrossReferenceEntity> CrossReferences { get; set; } = null!;
+    
+    // Function specification entities
+    public DbSet<DesignerOutput> DesignerOutputs { get; set; } = null!;
+    public DbSet<FunctionSpecification> FunctionSpecifications { get; set; } = null!;
+    public DbSet<CodeUnit> CodeUnits { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -37,6 +45,7 @@ public class MaestroDbContext : DbContext
             entity.HasIndex(e => e.CreatedAt);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
             entity.Property(e => e.UpdatedAt).HasDefaultValueSql("GETUTCDATE()");
+            entity.Property(e => e.EstimatedHours).HasPrecision(18, 2);
         });
 
         // Configure PipelineExecution entity
@@ -116,6 +125,8 @@ public class MaestroDbContext : DbContext
             entity.HasIndex(e => e.ModuleOrder);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
             entity.Property(e => e.UpdatedAt).HasDefaultValueSql("GETUTCDATE()");
+            entity.Property(e => e.EstimatedHours).HasPrecision(18, 2);
+            entity.Property(e => e.ActualHours).HasPrecision(18, 2);
 
             // Foreign key relationships
             entity.HasOne(e => e.Project)
@@ -207,6 +218,125 @@ public class MaestroDbContext : DbContext
                   .OnDelete(DeleteBehavior.Restrict); // Prevent cascading deletes for nested orchestrations
         });
 
+        // Configure CrossReference entity
+        modelBuilder.Entity<CrossReferenceEntity>(entity =>
+        {
+            entity.HasKey(e => e.PrimaryId);
+            entity.HasIndex(e => e.EntityType);
+            entity.HasIndex(e => e.Status);
+            entity.HasIndex(e => e.CreatedAt);
+            entity.HasIndex(e => e.LastIntegrityCheck);
+            entity.HasIndex(e => new { e.EntityType, e.Status });
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("GETUTCDATE()");
+        });
+
+        // Configure DesignerOutput entity
+        modelBuilder.Entity<DesignerOutput>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.CrossReferenceId);
+            entity.HasIndex(e => e.ProjectId);
+            entity.HasIndex(e => e.AgentType);
+            entity.HasIndex(e => e.Status);
+            entity.HasIndex(e => e.CreatedAt);
+            entity.HasIndex(e => new { e.ProjectId, e.AgentType, e.Status });
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("GETUTCDATE()");
+            entity.Property(e => e.EstimatedHours).HasPrecision(18, 2);
+            
+            // Configure relationships
+            entity.HasOne(e => e.CrossReference)
+                  .WithMany()
+                  .HasForeignKey(e => e.CrossReferenceId)
+                  .OnDelete(DeleteBehavior.Restrict);
+            
+            entity.HasOne(e => e.Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Configure FunctionSpecification entity
+        modelBuilder.Entity<FunctionSpecification>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.CrossReferenceId);
+            entity.HasIndex(e => e.ProjectId);
+            entity.HasIndex(e => e.FunctionName);
+            entity.HasIndex(e => e.CodeUnit);
+            entity.HasIndex(e => e.Language);
+            entity.HasIndex(e => e.Status);
+            entity.HasIndex(e => e.ComplexityRating);
+            entity.HasIndex(e => e.Priority);
+            entity.HasIndex(e => e.CreatedAt);
+            entity.HasIndex(e => new { e.ProjectId, e.CodeUnit, e.Status });
+            entity.HasIndex(e => new { e.Language, e.ComplexityRating });
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("GETUTCDATE()");
+            
+            // Configure relationships - use NoAction to avoid cascade conflicts
+            entity.HasOne(e => e.CrossReference)
+                  .WithMany()
+                  .HasForeignKey(e => e.CrossReferenceId)
+                  .OnDelete(DeleteBehavior.Restrict);
+            
+            entity.HasOne(e => e.Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectId)
+                  .OnDelete(DeleteBehavior.NoAction);
+                  
+            entity.HasOne(e => e.PipelineExecution)
+                  .WithMany()
+                  .HasForeignKey(e => e.PipelineExecutionId)
+                  .OnDelete(DeleteBehavior.NoAction);
+                  
+            entity.HasOne(e => e.AgentExecution)
+                  .WithMany()
+                  .HasForeignKey(e => e.AgentExecutionId)
+                  .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        // Configure CodeUnit entity
+        modelBuilder.Entity<CodeUnit>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.CrossReferenceId);
+            entity.HasIndex(e => e.ProjectId);
+            entity.HasIndex(e => e.Name);
+            entity.HasIndex(e => e.UnitType);
+            entity.HasIndex(e => e.Language);
+            entity.HasIndex(e => e.Status);
+            entity.HasIndex(e => e.ComplexityRating);
+            entity.HasIndex(e => e.AssignedController);
+            entity.HasIndex(e => e.CreatedAt);
+            entity.HasIndex(e => new { e.ProjectId, e.Status });
+            entity.HasIndex(e => new { e.Language, e.UnitType });
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("GETUTCDATE()");
+            
+            // Configure relationships - use NoAction to avoid cascade conflicts
+            entity.HasOne(e => e.CrossReference)
+                  .WithMany()
+                  .HasForeignKey(e => e.CrossReferenceId)
+                  .OnDelete(DeleteBehavior.Restrict);
+            
+            entity.HasOne(e => e.Project)
+                  .WithMany()
+                  .HasForeignKey(e => e.ProjectId)
+                  .OnDelete(DeleteBehavior.NoAction);
+                  
+            entity.HasOne(e => e.PipelineExecution)
+                  .WithMany()
+                  .HasForeignKey(e => e.PipelineExecutionId)
+                  .OnDelete(DeleteBehavior.NoAction);
+            
+            entity.HasMany(e => e.FunctionSpecifications)
+                  .WithOne()
+                  .HasForeignKey("CodeUnitId")
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
         // Add some useful composite indexes
         modelBuilder.Entity<PipelineExecution>()
             .HasIndex(e => new { e.ProjectId, e.Status });
@@ -229,7 +359,8 @@ public class MaestroDbContext : DbContext
         // Automatically update UpdatedAt timestamp for entities that have it
         var entries = ChangeTracker
             .Entries()
-            .Where(e => e.Entity is Project or ProjectFile or Module && 
+            .Where(e => e.Entity is Project or ProjectFile or Module or CrossReferenceEntity or 
+                        DesignerOutput or FunctionSpecification or CodeUnit && 
                        (e.State == EntityState.Modified));
 
         foreach (var entityEntry in entries)
@@ -240,6 +371,14 @@ public class MaestroDbContext : DbContext
                 file.UpdatedAt = DateTime.UtcNow;
             else if (entityEntry.Entity is Module module)
                 module.UpdatedAt = DateTime.UtcNow;
+            else if (entityEntry.Entity is CrossReferenceEntity crossRef)
+                crossRef.UpdatedAt = DateTime.UtcNow;
+            else if (entityEntry.Entity is DesignerOutput designerOutput)
+                designerOutput.UpdatedAt = DateTime.UtcNow;
+            else if (entityEntry.Entity is FunctionSpecification funcSpec)
+                funcSpec.UpdatedAt = DateTime.UtcNow;
+            else if (entityEntry.Entity is CodeUnit codeUnit)
+                codeUnit.UpdatedAt = DateTime.UtcNow;
         }
 
         return await base.SaveChangesAsync(cancellationToken);

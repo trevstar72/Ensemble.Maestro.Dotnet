@@ -876,7 +876,7 @@ public class AgentExecutionRepository : Repository<AgentExecution>, IAgentExecut
             var executions = await _dbSet
                 .Where(ae => ae.InputTokens.HasValue && ae.OutputTokens.HasValue &&
                             (ae.InputTokens.Value + ae.OutputTokens.Value) > threshold)
-                .OrderByDescending(ae => ae.InputTokens.Value + ae.OutputTokens.Value)
+                .OrderByDescending(ae => ae.InputTokens!.Value + ae.OutputTokens!.Value)
                 .ToListAsync();
             return Result.Success(executions.AsEnumerable());
         }
@@ -894,7 +894,7 @@ public class AgentExecutionRepository : Repository<AgentExecution>, IAgentExecut
 
             var executions = await _dbSet
                 .Where(ae => ae.ExecutionCost.HasValue && ae.ExecutionCost.Value > threshold)
-                .OrderByDescending(ae => ae.ExecutionCost.Value)
+                .OrderByDescending(ae => ae.ExecutionCost!.Value)
                 .ToListAsync();
             return Result.Success(executions.AsEnumerable());
         }

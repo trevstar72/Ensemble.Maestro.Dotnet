@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Suppress common warnings across the solution -->
+    <NoWarn>$(NoWarn);CS1998</NoWarn> <!-- Async method lacks 'await' operators -->
+  </PropertyGroup>
+</Project>

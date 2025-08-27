@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  # SQL Server Database
+  maestro-sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: maestro-sqlserver
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=Maestro123!
+      - MSSQL_PID=Express
+    ports:
+      - "1434:1433"
+    volumes:
+      - maestro-sql-data:/var/opt/mssql
+    networks:
+      - maestro-network
+
+  # Neo4j Graph Database  
+  maestro-neo4j:
+    image: neo4j:5.15-community
+    container_name: maestro-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/ensemble123
+      - NEO4J_server_memory_heap_max__size=512m
+      - NEO4J_server_memory_pagecache_size=256m
+    ports:
+      - "7687:7687"
+      - "7474:7474"
+    volumes:
+      - maestro-neo4j-data:/data
+      - maestro-neo4j-logs:/logs
+    networks:
+      - maestro-network
+
+  # Qdrant Vector Database
+  maestro-qdrant:
+    image: qdrant/qdrant:v1.7.4
+    container_name: maestro-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - maestro-qdrant-data:/qdrant/storage
+    networks:
+      - maestro-network
+
+  # Redis Cache & Message Queue
+  maestro-redis:
+    image: redis:7.2-alpine
+    container_name: maestro-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - maestro-redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - maestro-network
+
+  # Elasticsearch for Full-Text Search & Code Storage
+  maestro-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+    container_name: maestro-elasticsearch
+    environment:
+      - node.name=maestro-es-node
+      - cluster.name=maestro-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - maestro-elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - maestro-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  maestro-sql-data:
+    driver: local
+  maestro-neo4j-data:
+    driver: local
+  maestro-neo4j-logs:
+    driver: local
+  maestro-qdrant-data:
+    driver: local
+  maestro-redis-data:
+    driver: local
+  maestro-elasticsearch-data:
+    driver: local
+
+networks:
+  maestro-network:
+    driver: bridge
+    name: maestro-network

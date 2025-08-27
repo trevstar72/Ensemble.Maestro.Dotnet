@@ -2,6 +2,8 @@ using Ensemble.Maestro.Dotnet.Components;
 using Ensemble.Maestro.Dotnet.Core.Data;
 using Ensemble.Maestro.Dotnet.Core.Data.Repositories;
 using Ensemble.Maestro.Dotnet.Core.Services;
+using Ensemble.Maestro.Dotnet.Core.Agents;
+using Ensemble.Maestro.Dotnet.Core.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.SemanticKernel;
 using FastEndpoints;
@@ -49,6 +51,34 @@ builder.Services.AddScoped<IProjectService, ProjectService>();
 builder.Services.AddScoped<TestbenchService>();
 builder.Services.AddScoped<ExportService>();
 
+// Add LLM services
+builder.Services.AddScoped<ILLMService, LLMService>();
+
+// Add Agent services
+builder.Services.AddScoped<IAgentFactory, AgentFactory>();
+builder.Services.AddScoped<AgentExecutionService>();
+
+// Add Cross-database coordination services
+builder.Services.AddScoped<ICrossReferenceService, CrossReferenceService>();
+builder.Services.AddScoped<INeo4jService, Neo4jService>();
+builder.Services.AddScoped<IElasticsearchService, ElasticsearchService>();
+
+// Add Designer output storage service
+builder.Services.AddScoped<IDesignerOutputStorageService, DesignerOutputStorageService>();
+
+// Add Redis message queue service
+builder.Services.AddScoped<IRedisMessageQueueService, RedisMessageQueueService>();
+
+// Add Message Coordinator service
+builder.Services.AddScoped<IMessageCoordinatorService, MessageCoordinatorService>();
+
+// Add Swarm Configuration service
+builder.Services.AddScoped<ISwarmConfigurationService, SwarmConfigurationService>();
+
+// Configure SwarmConfiguration from appsettings
+builder.Services.Configure<SwarmConfiguration>(
+    builder.Configuration.GetSection(SwarmConfiguration.SectionName));
+
 // Add Semantic Kernel
 var kernelBuilder = builder.Services.AddKernel();
 
@@ -83,9 +113,80 @@ builder.Services.AddFastEndpoints();
 // Add health checks for external dependencies
 builder.Services.AddHealthChecks()
     .AddDbContextCheck<MaestroDbContext>()
-    .AddCheck("neo4j", () => Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Neo4j placeholder"))
-    .AddCheck("qdrant", () => Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Qdrant placeholder"))
-    .AddCheck("redis", () => Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Redis placeholder"));
+    .AddCheck("neo4j", () =>
+    {
+        try
+        {
+            // Simple TCP connection check to Neo4j port
+            using var client = new System.Net.Sockets.TcpClient();
+            var result = client.BeginConnect("localhost", 7687, null, null);
+            var success = result.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(1));
+            client.EndConnect(result);
+            
+            return success
+                ? Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Neo4j connection successful")
+                : Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy("Neo4j connection failed");
+        }
+        catch (Exception ex)
+        {
+            return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy($"Neo4j health check failed: {ex.Message}");
+        }
+    })
+    .AddCheck("qdrant", () =>
+    {
+        try
+        {
+            // Simple HTTP check to Qdrant health endpoint
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(2);
+            var response = httpClient.GetAsync("http://localhost:6333/").GetAwaiter().GetResult();
+            
+            return response.IsSuccessStatusCode
+                ? Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Qdrant API accessible")
+                : Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy($"Qdrant returned {response.StatusCode}");
+        }
+        catch (Exception ex)
+        {
+            return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy($"Qdrant health check failed: {ex.Message}");
+        }
+    })
+    .AddCheck("redis", () =>
+    {
+        try
+        {
+            // Simple TCP connection check to Redis port
+            using var client = new System.Net.Sockets.TcpClient();
+            var result = client.BeginConnect("localhost", 6379, null, null);
+            var success = result.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(1));
+            client.EndConnect(result);
+            
+            return success
+                ? Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Redis connection successful")
+                : Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy("Redis connection failed");
+        }
+        catch (Exception ex)
+        {
+            return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy($"Redis health check failed: {ex.Message}");
+        }
+    })
+    .AddCheck("elasticsearch", () =>
+    {
+        try
+        {
+            // Simple HTTP check to Elasticsearch health endpoint
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(2);
+            var response = httpClient.GetAsync("http://localhost:9200/_cluster/health").GetAwaiter().GetResult();
+            
+            return response.IsSuccessStatusCode
+                ? Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Elasticsearch cluster accessible")
+                : Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy($"Elasticsearch returned {response.StatusCode}");
+        }
+        catch (Exception ex)
+        {
+            return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy($"Elasticsearch health check failed: {ex.Message}");
+        }
+    });
 
 var app = builder.Build();
 

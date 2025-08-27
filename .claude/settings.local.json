@@ -12,7 +12,8 @@
       "Read(/D:\\Repos\\Ensemble.Maestro\\src\\design\\backend/**)",
       "Read(/D:\\Repos\\Ensemble.Maestro\\src\\mcp\\tools/**)",
       "mcp__context7__resolve-library-id",
-      "mcp__context7__get-library-docs"
+      "mcp__context7__get-library-docs",
+      "mcp__resonance-hybrid__store_memory"
     ],
     "deny": [],
     "ask": []
