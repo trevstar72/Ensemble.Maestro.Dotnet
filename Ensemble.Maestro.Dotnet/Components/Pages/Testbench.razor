@@ -1,0 +1,413 @@
+@page "/testbench"
+@using Ensemble.Maestro.Dotnet.Core.Services
+@using Ensemble.Maestro.Dotnet.Core.Data.Entities
+@inject TestbenchService TestbenchService
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+@implements IDisposable
+
+<PageTitle>Maestro Testbench</PageTitle>
+
+<div class="testbench-container">
+    <div class="header-section">
+        <h1 class="display-6 mb-0">
+            <i class="fas fa-flask text-primary"></i> Maestro Testbench
+        </h1>
+        <p class="text-muted">Pipeline testing and experimentation environment</p>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card stat-card stat-total">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="card-title text-muted mb-1">Total Executions</h6>
+                            <h3 class="mb-0">@stats.TotalExecutions</h3>
+                        </div>
+                        <div class="stat-icon">
+                            <i class="fas fa-play-circle"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card stat-card stat-active">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="card-title text-muted mb-1">Active</h6>
+                            <h3 class="mb-0">@stats.ActiveExecutions</h3>
+                        </div>
+                        <div class="stat-icon">
+                            <i class="fas fa-spinner fa-spin"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card stat-card stat-success">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="card-title text-muted mb-1">Success Rate</h6>
+                            <h3 class="mb-0">@($"{stats.SuccessRate:F1}%")</h3>
+                        </div>
+                        <div class="stat-icon">
+                            <i class="fas fa-check-circle"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card stat-card stat-cost">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="card-title text-muted mb-1">Total Cost</h6>
+                            <h3 class="mb-0">$@($"{stats.TotalCostUSD:F2}")</h3>
+                        </div>
+                        <div class="stat-icon">
+                            <i class="fas fa-dollar-sign"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Control Panel -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">
+                        <i class="fas fa-cog"></i> Test Control Panel
+                    </h5>
+                    <button class="btn btn-success" @onclick="ShowNewTestModal">
+                        <i class="fas fa-plus"></i> New Test
+                    </button>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="d-flex gap-2 mb-3">
+                                <button class="btn btn-outline-primary" @onclick="RefreshData">
+                                    <i class="fas fa-sync-alt"></i> Refresh
+                                </button>
+                                <button class="btn btn-outline-info" @onclick="ToggleAutoRefresh">
+                                    <i class="fas @(autoRefresh ? "fa-pause" : "fa-play")"></i>
+                                    @(autoRefresh ? "Pause" : "Start") Auto-Refresh
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-md-6 text-end">
+                            <small class="text-muted">
+                                Last updated: @lastUpdate.ToString("HH:mm:ss")
+                            </small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Active Executions -->
+    @if (activeExecutions.Any())
+    {
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">
+                            <i class="fas fa-running text-warning"></i> Active Executions
+                        </h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Project</th>
+                                        <th>Stage</th>
+                                        <th>Progress</th>
+                                        <th>Duration</th>
+                                        <th>Agents</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var execution in activeExecutions)
+                                    {
+                                        <tr>
+                                            <td>
+                                                <code class="text-primary">@execution.Id.ToString()[..8]</code>
+                                            </td>
+                                            <td>@execution.Project?.Name</td>
+                                            <td>
+                                                <span class="badge bg-info">@execution.Stage</span>
+                                            </td>
+                                            <td>
+                                                <div class="progress" style="height: 20px;">
+                                                    <div class="progress-bar bg-info progress-bar-striped progress-bar-animated"
+                                                         style="width: @(execution.ProgressPercentage)%">
+                                                        @(execution.ProgressPercentage)%
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            <td>@GetElapsedTime(execution.StartedAt)</td>
+                                            <td>
+                                                <span class="badge bg-secondary">@execution.AgentExecutions.Count</span>
+                                            </td>
+                                            <td>
+                                                <div class="btn-group btn-group-sm">
+                                                    <button class="btn btn-outline-primary" @onclick="() => ViewExecution(execution.Id)">
+                                                        <i class="fas fa-eye"></i>
+                                                    </button>
+                                                    <button class="btn btn-outline-danger" @onclick="() => CancelExecution(execution.Id)">
+                                                        <i class="fas fa-stop"></i>
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    <!-- Recent Executions -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">
+                        <i class="fas fa-history"></i> Recent Executions
+                    </h5>
+                    <button class="btn btn-outline-secondary btn-sm" @onclick="ExportResults">
+                        <i class="fas fa-download"></i> Export
+                    </button>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Project</th>
+                                    <th>Status</th>
+                                    <th>Duration</th>
+                                    <th>Agents</th>
+                                    <th>Tokens</th>
+                                    <th>Cost</th>
+                                    <th>Started</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var execution in recentExecutions)
+                                {
+                                    <tr>
+                                        <td>
+                                            <code class="text-primary">@execution.Id.ToString()[..8]</code>
+                                        </td>
+                                        <td>@execution.Project?.Name</td>
+                                        <td>
+                                            <span class="badge @GetStatusBadgeClass(execution.Status)">
+                                                @execution.Status
+                                            </span>
+                                        </td>
+                                        <td>
+                                            @if (execution.ActualDurationSeconds.HasValue)
+                                            {
+                                                @TimeSpan.FromSeconds(execution.ActualDurationSeconds.Value).ToString(@"mm\:ss")
+                                            }
+                                            else
+                                            {
+                                                <span class="text-muted">-</span>
+                                            }
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-secondary">@execution.AgentExecutions.Count</span>
+                                        </td>
+                                        <td>
+                                            @{
+                                                var totalTokens = execution.AgentExecutions.Sum(a => a.TotalTokens ?? 0);
+                                            }
+                                            <small>@totalTokens.ToString("N0")</small>
+                                        </td>
+                                        <td>
+                                            @{
+                                                var totalCost = execution.AgentExecutions.Sum(a => a.ExecutionCost ?? 0);
+                                            }
+                                            <small>$@totalCost.ToString("F3")</small>
+                                        </td>
+                                        <td>
+                                            <small class="text-muted">@execution.StartedAt.ToString("HH:mm:ss")</small>
+                                        </td>
+                                        <td>
+                                            <button class="btn btn-outline-primary btn-sm" @onclick="() => ViewExecution(execution.Id)">
+                                                <i class="fas fa-eye"></i> View
+                                            </button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<NewTestModal IsVisible="showNewTestModal" OnHide="HideNewTestModal" OnTestStarted="OnTestStarted" />
+
+@code {
+    private TestbenchStats stats = new();
+    private List<PipelineExecution> activeExecutions = new();
+    private List<PipelineExecution> recentExecutions = new();
+    private DateTime lastUpdate = DateTime.Now;
+    private bool autoRefresh = true;
+    private Timer? refreshTimer;
+    private bool showNewTestModal = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshData();
+        StartAutoRefresh();
+    }
+
+    private async Task RefreshData()
+    {
+        stats = await TestbenchService.GetTestbenchStats();
+        activeExecutions = await TestbenchService.GetActiveExecutions();
+        recentExecutions = await TestbenchService.GetRecentExecutions();
+        lastUpdate = DateTime.Now;
+        StateHasChanged();
+    }
+
+    private void StartAutoRefresh()
+    {
+        if (autoRefresh)
+        {
+            refreshTimer = new Timer(async _ => await InvokeAsync(RefreshData), null, 
+                TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private void StopAutoRefresh()
+    {
+        refreshTimer?.Dispose();
+        refreshTimer = null;
+    }
+
+    private async Task ToggleAutoRefresh()
+    {
+        autoRefresh = !autoRefresh;
+        if (autoRefresh)
+        {
+            StartAutoRefresh();
+        }
+        else
+        {
+            StopAutoRefresh();
+        }
+    }
+
+    private async Task ShowNewTestModal()
+    {
+        showNewTestModal = true;
+        StateHasChanged();
+    }
+    
+    private async Task HideNewTestModal()
+    {
+        showNewTestModal = false;
+        StateHasChanged();
+    }
+    
+    private async Task OnTestStarted(TestConfiguration config)
+    {
+        try
+        {
+            // Log that we're starting a test
+            Console.WriteLine($"Starting test with ProjectId: {config.ProjectId}, Language: {config.TargetLanguage}");
+            
+            var execution = await TestbenchService.StartTestExecution(config);
+            await RefreshData();
+            
+            Console.WriteLine($"Test started successfully! Execution ID: {execution.Id}");
+            // Note: Removed JSRuntime.InvokeVoidAsync to avoid interop issues during server rendering
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error starting test: {ex.Message}");
+            Console.WriteLine($"Stack trace: {ex.StackTrace}");
+            // Note: Error handling without JavaScript interop during server rendering
+        }
+    }
+
+    private async Task ViewExecution(Guid executionId)
+    {
+        Navigation.NavigateTo($"/testbench/execution/{executionId}");
+        await Task.CompletedTask;
+    }
+
+    private async Task CancelExecution(Guid executionId)
+    {
+        if (await JSRuntime.InvokeAsync<bool>("confirm", "Are you sure you want to cancel this execution?"))
+        {
+            await TestbenchService.CancelExecution(executionId);
+            await RefreshData();
+        }
+    }
+
+    private async Task ExportResults()
+    {
+        try
+        {
+            var format = await JSRuntime.InvokeAsync<string>("prompt", "Export format (json/csv/excel):", "json");
+            if (string.IsNullOrWhiteSpace(format)) return;
+
+            var url = $"/api/exports/summary?format={format.ToLower()}";
+            await JSRuntime.InvokeVoidAsync("window.open", url, "_blank");
+        }
+        catch (Exception ex)
+        {
+            await JSRuntime.InvokeVoidAsync("alert", $"Export failed: {ex.Message}");
+        }
+    }
+
+    private static string GetElapsedTime(DateTime startTime)
+    {
+        var elapsed = DateTime.UtcNow - startTime;
+        return elapsed.ToString(@"mm\:ss");
+    }
+
+    private static string GetStatusBadgeClass(string status)
+    {
+        return status.ToLower() switch
+        {
+            "completed" => "bg-success",
+            "running" => "bg-info",
+            "failed" or "error" => "bg-danger",
+            "cancelled" => "bg-warning",
+            _ => "bg-secondary"
+        };
+    }
+
+    public void Dispose()
+    {
+        refreshTimer?.Dispose();
+    }
+}

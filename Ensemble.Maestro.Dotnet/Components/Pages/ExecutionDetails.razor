@@ -1,0 +1,458 @@
+@page "/testbench/execution/{executionId:guid}"
+@using Ensemble.Maestro.Dotnet.Core.Services
+@using Ensemble.Maestro.Dotnet.Core.Data.Entities
+@using System.Text.Json
+@inject TestbenchService TestbenchService
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Execution Details - @ExecutionId.ToString()[..8]</PageTitle>
+
+<div class="execution-details-container">
+    @if (execution == null)
+    {
+        <div class="d-flex justify-content-center align-items-center" style="height: 50vh;">
+            <div class="spinner-border text-primary" style="width: 3rem; height: 3rem;" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+        </div>
+    }
+    else
+    {
+        <!-- Header -->
+        <div class="header-section">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item">
+                        <a href="/testbench" class="text-decoration-none">Testbench</a>
+                    </li>
+                    <li class="breadcrumb-item active">Execution @execution.Id.ToString()[..8]</li>
+                </ol>
+            </nav>
+            
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <div>
+                    <h1 class="display-6 mb-2">
+                        <i class="fas fa-cogs text-primary"></i>
+                        Pipeline Execution
+                    </h1>
+                    <div class="d-flex gap-3 align-items-center">
+                        <span class="badge @GetStatusBadgeClass(execution.Status) fs-6">
+                            @execution.Status
+                        </span>
+                        <small class="text-muted">
+                            <i class="fas fa-clock"></i>
+                            Started @execution.StartedAt.ToString("yyyy-MM-dd HH:mm:ss UTC")
+                        </small>
+                    </div>
+                </div>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-outline-primary" @onclick="RefreshData">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                    <button class="btn btn-outline-secondary" @onclick="ExportExecution">
+                        <i class="fas fa-download"></i> Export
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Execution Overview -->
+        <div class="row mb-4">
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-info-circle"></i> Execution Overview</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <dl class="row">
+                                    <dt class="col-sm-5">ID:</dt>
+                                    <dd class="col-sm-7"><code>@execution.Id</code></dd>
+                                    
+                                    <dt class="col-sm-5">Project:</dt>
+                                    <dd class="col-sm-7">@execution.Project?.Name</dd>
+                                    
+                                    <dt class="col-sm-5">Current Stage:</dt>
+                                    <dd class="col-sm-7">
+                                        <span class="badge bg-info">@execution.Stage</span>
+                                    </dd>
+                                    
+                                    <dt class="col-sm-5">Target Language:</dt>
+                                    <dd class="col-sm-7">@(execution.TargetLanguage ?? "N/A")</dd>
+                                </dl>
+                            </div>
+                            <div class="col-md-6">
+                                <dl class="row">
+                                    <dt class="col-sm-5">Progress:</dt>
+                                    <dd class="col-sm-7">
+                                        <div class="progress mb-1" style="height: 20px;">
+                                            <div class="progress-bar bg-primary"
+                                                 style="width: @(execution.ProgressPercentage)%">
+                                                @(execution.ProgressPercentage)%
+                                            </div>
+                                        </div>
+                                    </dd>
+                                    
+                                    <dt class="col-sm-5">Duration:</dt>
+                                    <dd class="col-sm-7">
+                                        @if (execution.ActualDurationSeconds.HasValue)
+                                        {
+                                            @TimeSpan.FromSeconds(execution.ActualDurationSeconds.Value).ToString(@"hh\:mm\:ss")
+                                        }
+                                        else
+                                        {
+                                            @TimeSpan.FromSeconds((DateTime.UtcNow - execution.StartedAt).TotalSeconds).ToString(@"hh\:mm\:ss")
+                                            <small class="text-muted">(ongoing)</small>
+                                        }
+                                    </dd>
+                                    
+                                    <dt class="col-sm-5">Agent Pool:</dt>
+                                    <dd class="col-sm-7">@(execution.AgentPoolSize?.ToString() ?? "Default")</dd>
+                                    
+                                    <dt class="col-sm-5">Functions:</dt>
+                                    <dd class="col-sm-7">
+                                        @execution.CompletedFunctions / @(execution.TotalFunctions?.ToString() ?? "?")
+                                        @if (execution.FailedFunctions > 0)
+                                        {
+                                            <small class="text-danger">(@execution.FailedFunctions failed)</small>
+                                        }
+                                    </dd>
+                                </dl>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-chart-pie"></i> Execution Metrics</h5>
+                    </div>
+                    <div class="card-body">
+                        @{
+                            var totalTokens = agentExecutions.Sum(a => a.TotalTokens ?? 0);
+                            var totalCost = agentExecutions.Sum(a => a.ExecutionCost ?? 0);
+                            var avgQuality = agentExecutions.Where(a => a.QualityScore.HasValue).Average(a => (double?)a.QualityScore) ?? 0;
+                        }
+                        
+                        <div class="metric-item">
+                            <div class="metric-label">Total Tokens</div>
+                            <div class="metric-value">@totalTokens.ToString("N0")</div>
+                        </div>
+                        
+                        <div class="metric-item">
+                            <div class="metric-label">Total Cost</div>
+                            <div class="metric-value">$@totalCost.ToString("F4")</div>
+                        </div>
+                        
+                        <div class="metric-item">
+                            <div class="metric-label">Agent Executions</div>
+                            <div class="metric-value">@agentExecutions.Count</div>
+                        </div>
+                        
+                        <div class="metric-item">
+                            <div class="metric-label">Avg Quality Score</div>
+                            <div class="metric-value">@avgQuality.ToString("F1")</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stage Timeline -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-timeline"></i> Stage Timeline</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="stage-timeline">
+                            @foreach (var stage in execution.StageExecutions.OrderBy(s => s.ExecutionOrder))
+                            {
+                                <div class="stage-item @(stage.IsCompleted ? "completed" : stage.IsExecuting ? "active" : stage.IsFailed ? "failed" : "pending")">
+                                    <div class="stage-marker">
+                                        @if (stage.IsCompleted)
+                                        {
+                                            <i class="fas fa-check"></i>
+                                        }
+                                        else if (stage.IsExecuting)
+                                        {
+                                            <i class="fas fa-spinner fa-spin"></i>
+                                        }
+                                        else if (stage.IsFailed)
+                                        {
+                                            <i class="fas fa-times"></i>
+                                        }
+                                        else
+                                        {
+                                            <i class="fas fa-clock"></i>
+                                        }
+                                    </div>
+                                    <div class="stage-content">
+                                        <h6>@stage.StageName</h6>
+                                        <div class="stage-details">
+                                            <small class="text-muted">
+                                                @if (stage.DurationSeconds.HasValue)
+                                                {
+                                                    @TimeSpan.FromSeconds(stage.DurationSeconds.Value).ToString(@"mm\:ss")
+                                                }
+                                                else if (stage.IsExecuting)
+                                                {
+                                                    @TimeSpan.FromSeconds((DateTime.UtcNow - stage.StartedAt).TotalSeconds).ToString(@"mm\:ss")
+                                                }
+                                            </small>
+                                            @if (stage.AgentExecutions.Any())
+                                            {
+                                                <span class="badge bg-secondary ms-2">@stage.AgentExecutions.Count agents</span>
+                                            }
+                                        </div>
+                                        @if (stage.IsExecuting && stage.ProgressPercentage > 0)
+                                        {
+                                            <div class="progress mt-2" style="height: 4px;">
+                                                <div class="progress-bar bg-info" style="width: @(stage.ProgressPercentage)%"></div>
+                                            </div>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Agent Executions -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-robot"></i> Agent Executions (@agentExecutions.Count)</h5>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary @(agentFilter == "all" ? "active" : "")"
+                                    @onclick="SetAllFilter">
+                                All
+                            </button>
+                            <button class="btn btn-outline-success @(agentFilter == "completed" ? "active" : "")"
+                                    @onclick="SetCompletedFilter">
+                                Completed
+                            </button>
+                            <button class="btn btn-outline-info @(agentFilter == "running" ? "active" : "")"
+                                    @onclick="SetRunningFilter">
+                                Running
+                            </button>
+                            <button class="btn btn-outline-danger @(agentFilter == "failed" ? "active" : "")"
+                                    @onclick="SetFailedFilter">
+                                Failed
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Agent</th>
+                                        <th>Type</th>
+                                        <th>Status</th>
+                                        <th>Duration</th>
+                                        <th>Tokens</th>
+                                        <th>Cost</th>
+                                        <th>Quality</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var agent in GetFilteredAgents())
+                                    {
+                                        <tr class="@(selectedAgentId == agent.Id ? "table-active" : "")">
+                                            <td>
+                                                <div>
+                                                    <strong>@agent.AgentName</strong>
+                                                    @if (!string.IsNullOrEmpty(agent.AgentSpecialization))
+                                                    {
+                                                        <br><small class="text-muted">@agent.AgentSpecialization</small>
+                                                    }
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <span class="badge bg-secondary">@agent.AgentType</span>
+                                            </td>
+                                            <td>
+                                                <span class="badge @GetStatusBadgeClass(agent.Status)">@agent.Status</span>
+                                                @if (agent.RetryAttempt > 0)
+                                                {
+                                                    <small class="text-muted d-block">Retry @agent.RetryAttempt</small>
+                                                }
+                                            </td>
+                                            <td>
+                                                @if (agent.DurationSeconds.HasValue)
+                                                {
+                                                    @TimeSpan.FromSeconds(agent.DurationSeconds.Value).ToString(@"mm\:ss")
+                                                }
+                                                else if (agent.IsRunning)
+                                                {
+                                                    @TimeSpan.FromSeconds((DateTime.UtcNow - agent.StartedAt).TotalSeconds).ToString(@"mm\:ss")
+                                                }
+                                                else
+                                                {
+                                                    <span class="text-muted">-</span>
+                                                }
+                                            </td>
+                                            <td>
+                                                @if (agent.TotalTokens.HasValue)
+                                                {
+                                                    @agent.TotalTokens.Value.ToString("N0")
+                                                    @if (agent.TokensPerSecond.HasValue)
+                                                    {
+                                                        <small class="text-muted d-block">@agent.TokensPerSecond.Value.ToString("F1") t/s</small>
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    <span class="text-muted">-</span>
+                                                }
+                                            </td>
+                                            <td>
+                                                @if (agent.ExecutionCost.HasValue)
+                                                {
+                                                    <small>$@agent.ExecutionCost.Value.ToString("F4")</small>
+                                                }
+                                                else
+                                                {
+                                                    <span class="text-muted">-</span>
+                                                }
+                                            </td>
+                                            <td>
+                                                @if (agent.QualityScore.HasValue)
+                                                {
+                                                    <div class="quality-score">
+                                                        @agent.QualityScore.Value<small>/100</small>
+                                                    </div>
+                                                    @if (agent.ConfidenceScore.HasValue)
+                                                    {
+                                                        <small class="text-muted">@agent.ConfidenceScore.Value% conf</small>
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    <span class="text-muted">-</span>
+                                                }
+                                            </td>
+                                            <td>
+                                                <button class="btn btn-outline-primary btn-sm" @onclick="() => ViewAgentDetails(agent.Id)">
+                                                    <i class="fas fa-eye"></i>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @if (!string.IsNullOrEmpty(execution.ErrorMessage))
+        {
+            <div class="row mb-4">
+                <div class="col-12">
+                    <div class="card border-danger">
+                        <div class="card-header bg-danger text-white">
+                            <h5><i class="fas fa-exclamation-triangle"></i> Error Details</h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="alert alert-danger" role="alert">
+                                <pre class="mb-0">@execution.ErrorMessage</pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    [Parameter] public Guid ExecutionId { get; set; }
+
+    private PipelineExecution? execution;
+    private List<AgentExecution> agentExecutions = new();
+    private string agentFilter = "all";
+    private Guid? selectedAgentId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshData();
+    }
+
+    private async Task RefreshData()
+    {
+        execution = await TestbenchService.GetExecutionDetails(ExecutionId);
+        if (execution != null)
+        {
+            agentExecutions = await TestbenchService.GetAgentExecutionsByPipeline(ExecutionId);
+        }
+        StateHasChanged();
+    }
+
+    private void SetAgentFilter(string filter)
+    {
+        agentFilter = filter;
+        StateHasChanged();
+    }
+
+    private IEnumerable<AgentExecution> GetFilteredAgents()
+    {
+        return agentFilter switch
+        {
+            "completed" => agentExecutions.Where(a => a.IsCompleted),
+            "running" => agentExecutions.Where(a => a.IsRunning),
+            "failed" => agentExecutions.Where(a => a.IsFailed),
+            _ => agentExecutions
+        };
+    }
+
+    private async Task ViewAgentDetails(Guid agentId)
+    {
+        selectedAgentId = selectedAgentId == agentId ? null : agentId;
+        // TODO: Implement agent details modal or navigation
+        await Task.CompletedTask;
+    }
+
+    private async Task ExportExecution()
+    {
+        try
+        {
+            var format = await JSRuntime.InvokeAsync<string>("prompt", "Export format (json/csv/excel):", "json");
+            if (string.IsNullOrWhiteSpace(format)) return;
+
+            var url = $"/api/exports/execution/{ExecutionId}?format={format.ToLower()}";
+            await JSRuntime.InvokeVoidAsync("window.open", url, "_blank");
+        }
+        catch (Exception ex)
+        {
+            await JSRuntime.InvokeVoidAsync("alert", $"Export failed: {ex.Message}");
+        }
+    }
+
+    private void SetAllFilter() => SetAgentFilter("all");
+    private void SetCompletedFilter() => SetAgentFilter("completed");
+    private void SetRunningFilter() => SetAgentFilter("running");
+    private void SetFailedFilter() => SetAgentFilter("failed");
+
+    private static string GetStatusBadgeClass(string status)
+    {
+        return status.ToLower() switch
+        {
+            "completed" => "bg-success",
+            "running" => "bg-info",
+            "failed" or "error" => "bg-danger",
+            "cancelled" => "bg-warning",
+            _ => "bg-secondary"
+        };
+    }
+}

@@ -1,0 +1,411 @@
+@using Ensemble.Maestro.Dotnet.Core.Services
+@using Ensemble.Maestro.Dotnet.Core.Data.Entities
+@inject TestbenchService TestbenchService
+@inject IProjectService ProjectService
+@inject IJSRuntime JSRuntime
+
+<div class="modal fade @(IsVisible ? "show" : "")" style="@(IsVisible ? "display: block;" : "display: none;")" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-rocket text-primary"></i>
+                    New Test Configuration
+                </h5>
+                <button type="button" class="btn-close" @onclick="Hide"></button>
+            </div>
+            
+            @if (!string.IsNullOrEmpty(errorMessage))
+            {
+                <div class="alert alert-danger mx-3 mt-3">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    @errorMessage
+                </div>
+            }
+            
+            <EditForm Model="testConfig" OnValidSubmit="StartTest" OnInvalidSubmit="OnInvalidSubmit" FormName="NewTestForm">
+                <DataAnnotationsValidator />
+                <div class="modal-body">
+                    <div class="row">
+                        <!-- Project Selection -->
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Project</label>
+                            <select class="form-select" @bind="testConfig.ProjectId">
+                                <option value="">Create new test project automatically</option>
+                                @foreach (var project in projects)
+                                {
+                                    <option value="@project.Id">@project.Name</option>
+                                }
+                            </select>
+                            <div class="form-text">Leave empty to create a new test project automatically</div>
+                        </div>
+                        
+                        <!-- Target Language -->
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Target Language</label>
+                            <select class="form-select" @bind="testConfig.TargetLanguage">
+                                <option value="">Auto-detect</option>
+                                <option value="C#">C#</option>
+                                <option value="TypeScript">TypeScript</option>
+                                <option value="Python">Python</option>
+                                <option value="Java">Java</option>
+                                <option value="Go">Go</option>
+                                <option value="Rust">Rust</option>
+                            </select>
+                        </div>
+                        
+                        <!-- Deployment Target -->
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Deployment Target</label>
+                            <select class="form-select" @bind="testConfig.DeploymentTarget">
+                                <option value="">Not specified</option>
+                                <option value="Azure">Azure</option>
+                                <option value="AWS">AWS</option>
+                                <option value="GCP">Google Cloud Platform</option>
+                                <option value="Docker">Docker</option>
+                                <option value="Kubernetes">Kubernetes</option>
+                                <option value="On-premises">On-premises</option>
+                            </select>
+                        </div>
+                        
+                        <!-- Agent Pool Size -->
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Agent Pool Size</label>
+                            <input type="number" class="form-control" @bind="testConfig.AgentPoolSize" 
+                                   min="1" max="20" placeholder="Default (5)">
+                            <div class="form-text">Number of concurrent agents (1-20)</div>
+                        </div>
+                        
+                        <!-- Estimated Duration -->
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Estimated Duration (minutes)</label>
+                            <input type="number" class="form-control" @bind="estimatedMinutes" 
+                                   min="1" max="180" placeholder="Auto-estimate">
+                            <div class="form-text">Expected execution time</div>
+                        </div>
+                        
+                        <!-- Test Preset -->
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Test Preset</label>
+                            <select class="form-select" @onchange="ApplyPreset">
+                                <option value="">Custom configuration</option>
+                                <option value="quick">Quick Test (minimal agents)</option>
+                                <option value="standard">Standard Test (balanced)</option>
+                                <option value="comprehensive">Comprehensive Test (all agents)</option>
+                                <option value="stress">Stress Test (max agents)</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- Advanced Configuration -->
+                    <div class="mt-4">
+                        <div class="d-flex align-items-center mb-3">
+                            <h6 class="mb-0">Advanced Configuration</h6>
+                            <button type="button" class="btn btn-outline-secondary btn-sm ms-2" 
+                                    @onclick="ToggleAdvanced">
+                                <i class="fas @(showAdvanced ? "fa-chevron-up" : "fa-chevron-down")"></i>
+                                @(showAdvanced ? "Hide" : "Show")
+                            </button>
+                        </div>
+                        
+                        @if (showAdvanced)
+                        {
+                            <div class="row">
+                                <!-- Custom Parameters -->
+                                <div class="col-12 mb-3">
+                                    <label class="form-label">Custom Parameters (JSON)</label>
+                                    <textarea class="form-control" rows="4" @bind="customParametersJson"
+                                              placeholder='{"key": "value", "timeout": 30}'>
+                                    </textarea>
+                                    <div class="form-text">Additional configuration parameters in JSON format</div>
+                                </div>
+                                
+                                <!-- Stage Configuration -->
+                                <div class="col-12 mb-3">
+                                    <label class="form-label">Enabled Stages</label>
+                                    <div class="d-flex flex-wrap gap-3">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="stagePlanning" @bind="stages.Planning">
+                                            <label class="form-check-label" for="stagePlanning">Planning</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="stageDesigning" @bind="stages.Designing">
+                                            <label class="form-check-label" for="stageDesigning">Designing</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="stageSwarming" @bind="stages.Swarming">
+                                            <label class="form-check-label" for="stageSwarming">Swarming</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="stageBuilding" @bind="stages.Building">
+                                            <label class="form-check-label" for="stageBuilding">Building</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="stageValidating" @bind="stages.Validating">
+                                            <label class="form-check-label" for="stageValidating">Validating</label>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Retry Configuration -->
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">Max Retry Attempts</label>
+                                    <input type="number" class="form-control" @bind="maxRetries" 
+                                           min="0" max="5">
+                                </div>
+                                
+                                <!-- Timeout Configuration -->
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">Timeout (minutes)</label>
+                                    <input type="number" class="form-control" @bind="timeoutMinutes" 
+                                           min="5" max="120">
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </div>
+                
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @onclick="Hide">
+                        Cancel
+                    </button>
+                    <button type="submit" class="btn btn-success" disabled="@isStarting" @onclick="OnSubmitClicked">
+                        @if (isStarting)
+                        {
+                            <span class="spinner-border spinner-border-sm me-2"></span>
+                        }
+                        <i class="fas fa-play"></i>
+                        @(isStarting ? "Starting..." : "Start Test")
+                    </button>
+                </div>
+            </EditForm>
+        </div>
+    </div>
+</div>
+
+@if (IsVisible)
+{
+    <div class="modal-backdrop fade show"></div>
+}
+
+@code {
+    [Parameter] 
+    public bool IsVisible { get; set; }
+    
+    [Parameter] public EventCallback OnHide { get; set; }
+    [Parameter] public EventCallback<TestConfiguration> OnTestStarted { get; set; }
+
+    protected override void OnParametersSet()
+    {
+        Console.WriteLine($"=== NewTestModal IsVisible changed to: {IsVisible} ===");
+        base.OnParametersSet();
+    }
+
+    private TestConfigurationModel testConfig = new();
+    private List<Project> projects = new();
+    private bool showAdvanced = false;
+    private bool isStarting = false;
+    private int? estimatedMinutes;
+    private string customParametersJson = "";
+    private int maxRetries = 3;
+    private int timeoutMinutes = 30;
+    private string? errorMessage;
+    
+    private StageConfiguration stages = new()
+    {
+        Planning = true,
+        Designing = true,
+        Swarming = true,
+        Building = true,
+        Validating = true
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        Console.WriteLine("=== NewTestModal OnInitializedAsync called ===");
+        await LoadProjects();
+    }
+
+    private async Task LoadProjects()
+    {
+        try
+        {
+            projects = await ProjectService.GetProjectEntitiesAsync();
+        }
+        catch (Exception ex)
+        {
+            // Log error but don't use JavaScript during server rendering
+            projects = new List<Project>();
+        }
+    }
+
+    private async Task StartTest()
+    {
+        Console.WriteLine("=== StartTest method called ===");
+        Console.WriteLine($"ProjectId: {testConfig.ProjectId}");
+        Console.WriteLine($"TargetLanguage: {testConfig.TargetLanguage}");
+        Console.WriteLine($"DeploymentTarget: {testConfig.DeploymentTarget}");
+        Console.WriteLine($"AgentPoolSize: {testConfig.AgentPoolSize}");
+        
+        // Allow empty ProjectId - TestbenchService will create a project automatically
+        // if (testConfig.ProjectId == Guid.Empty)
+        // {
+        //     await JSRuntime.InvokeVoidAsync("alert", "Please select a project.");
+        //     return;
+        // }
+
+        isStarting = true;
+        StateHasChanged();
+
+        try
+        {
+            var parameters = new Dictionary<string, object>();
+            
+            // Add custom parameters
+            if (!string.IsNullOrWhiteSpace(customParametersJson))
+            {
+                try
+                {
+                    var customParams = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(customParametersJson);
+                    if (customParams != null)
+                    {
+                        foreach (var kvp in customParams)
+                        {
+                            parameters[kvp.Key] = kvp.Value;
+                        }
+                    }
+                }
+                catch
+                {
+                    errorMessage = "Invalid JSON in custom parameters.";
+                    return;
+                }
+            }
+            
+            // Add configuration parameters
+            parameters["maxRetries"] = maxRetries;
+            parameters["timeoutMinutes"] = timeoutMinutes;
+            parameters["enabledStages"] = new[] 
+            { 
+                stages.Planning ? "Planning" : null,
+                stages.Designing ? "Designing" : null,
+                stages.Swarming ? "Swarming" : null,
+                stages.Building ? "Building" : null,
+                stages.Validating ? "Validating" : null
+            }.Where(s => s != null).ToArray();
+
+            var config = new TestConfiguration(
+                testConfig.ProjectId,
+                testConfig.TargetLanguage,
+                testConfig.DeploymentTarget,
+                testConfig.AgentPoolSize,
+                estimatedMinutes * 60, // Convert to seconds
+                parameters
+            );
+
+            await OnTestStarted.InvokeAsync(config);
+            ResetForm();
+            await Hide();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to start test: {ex.Message}";
+        }
+        finally
+        {
+            isStarting = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task OnInvalidSubmit()
+    {
+        Console.WriteLine("=== OnInvalidSubmit called - Form validation failed ===");
+        errorMessage = "Please check all form fields and try again.";
+        StateHasChanged();
+    }
+
+    private async Task OnSubmitClicked()
+    {
+        Console.WriteLine("=== Submit button clicked ===");
+    }
+
+    private async Task ApplyPreset(ChangeEventArgs e)
+    {
+        var preset = e.Value?.ToString();
+        switch (preset)
+        {
+            case "quick":
+                testConfig.AgentPoolSize = 2;
+                estimatedMinutes = 5;
+                stages = new StageConfiguration { Planning = true, Building = true, Validating = false };
+                break;
+            case "standard":
+                testConfig.AgentPoolSize = 5;
+                estimatedMinutes = 15;
+                stages = new StageConfiguration { Planning = true, Designing = true, Swarming = true, Building = true, Validating = true };
+                break;
+            case "comprehensive":
+                testConfig.AgentPoolSize = 10;
+                estimatedMinutes = 30;
+                stages = new StageConfiguration { Planning = true, Designing = true, Swarming = true, Building = true, Validating = true };
+                maxRetries = 5;
+                break;
+            case "stress":
+                testConfig.AgentPoolSize = 20;
+                estimatedMinutes = 60;
+                stages = new StageConfiguration { Planning = true, Designing = true, Swarming = true, Building = true, Validating = true };
+                maxRetries = 3;
+                timeoutMinutes = 90;
+                break;
+        }
+        StateHasChanged();
+    }
+
+    private void ToggleAdvanced()
+    {
+        showAdvanced = !showAdvanced;
+    }
+
+    private async Task Hide()
+    {
+        IsVisible = false;
+        await OnHide.InvokeAsync();
+    }
+
+    private void ResetForm()
+    {
+        testConfig = new TestConfigurationModel();
+        estimatedMinutes = null;
+        customParametersJson = "";
+        showAdvanced = false;
+        maxRetries = 3;
+        timeoutMinutes = 30;
+        errorMessage = null;
+        stages = new StageConfiguration
+        {
+            Planning = true,
+            Designing = true,
+            Swarming = true,
+            Building = true,
+            Validating = true
+        };
+    }
+
+    private class TestConfigurationModel
+    {
+        public Guid ProjectId { get; set; }
+        public string? TargetLanguage { get; set; }
+        public string? DeploymentTarget { get; set; }
+        public int? AgentPoolSize { get; set; }
+    }
+
+    private class StageConfiguration
+    {
+        public bool Planning { get; set; }
+        public bool Designing { get; set; }
+        public bool Swarming { get; set; }
+        public bool Building { get; set; }
+        public bool Validating { get; set; }
+    }
+}
