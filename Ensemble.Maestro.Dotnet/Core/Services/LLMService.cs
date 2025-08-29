@@ -1,6 +1,8 @@
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 using System.Diagnostics;
+using Microsoft.Extensions.Options;
+using Ensemble.Maestro.Dotnet.Core.Configuration;
 
 namespace Ensemble.Maestro.Dotnet.Core.Services;
 
@@ -12,12 +14,14 @@ public class LLMService : ILLMService
     private readonly Kernel _kernel;
     private readonly ILogger<LLMService> _logger;
     private readonly IConfiguration _configuration;
+    private readonly OutputPathsConfiguration _outputPaths;
     
-    public LLMService(Kernel kernel, ILogger<LLMService> logger, IConfiguration configuration)
+    public LLMService(Kernel kernel, ILogger<LLMService> logger, IConfiguration configuration, IOptions<OutputPathsConfiguration> outputPaths)
     {
         _kernel = kernel;
         _logger = logger;
         _configuration = configuration;
+        _outputPaths = outputPaths.Value;
     }
     
     public async Task<LLMResponse> GenerateResponseAsync(
@@ -189,8 +193,8 @@ public class LLMService : ILLMService
     {
         try
         {
-            // Create outputs directory if it doesn't exist
-            var outputsDir = Path.Combine(Directory.GetCurrentDirectory(), "ai-outputs");
+            // Create outputs directory if it doesn't exist using configured path
+            var outputsDir = _outputPaths.AgentOutputsDirectory;
             Directory.CreateDirectory(outputsDir);
             
             // Create filename with timestamp and agent info

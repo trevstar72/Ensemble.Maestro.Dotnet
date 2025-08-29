@@ -4,6 +4,7 @@ using Ensemble.Maestro.Dotnet.Core.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Ensemble.Maestro.Dotnet.Migrations
 {
     [DbContext(typeof(MaestroDbContext))]
-    partial class MaestroDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250829115414_RemoveFunctionSpecificationForeignKeys")]
+    partial class RemoveFunctionSpecificationForeignKeys
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

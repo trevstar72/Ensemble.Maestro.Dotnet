@@ -14,7 +14,7 @@ using System.Net;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configure Kestrel to use HTTPS only
+// Configure Kestrel for HTTPS only - use appsettings configuration
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.ConfigureHttpsDefaults(httpsOptions =>
@@ -23,12 +23,12 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 
-// Configure HTTPS redirection
-builder.Services.AddHttpsRedirection(options =>
-{
-    options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
-    options.HttpsPort = 5001;
-});
+// HTTPS redirection not needed since we only serve HTTPS
+// builder.Services.AddHttpsRedirection(options =>
+// {
+//     options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
+//     options.HttpsPort = 5001;
+// });
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
@@ -67,8 +67,11 @@ builder.Services.AddScoped<IElasticsearchService, ElasticsearchService>();
 // Add Designer output storage service
 builder.Services.AddScoped<IDesignerOutputStorageService, DesignerOutputStorageService>();
 
-// Add Redis message queue service
-builder.Services.AddScoped<IRedisMessageQueueService, RedisMessageQueueService>();
+// Add Queue Naming service (centralized queue key management)
+builder.Services.AddSingleton<IQueueNamingService, QueueNamingService>();
+
+// Add Redis message queue service (singleton for connection pooling)
+builder.Services.AddSingleton<IRedisMessageQueueService, RedisMessageQueueService>();
 
 // Add Message Coordinator service
 builder.Services.AddScoped<IMessageCoordinatorService, MessageCoordinatorService>();
@@ -92,6 +95,10 @@ builder.Services.AddHostedService<CodeUnitControllerHostedService>();
 // Configure SwarmConfiguration from appsettings
 builder.Services.Configure<SwarmConfiguration>(
     builder.Configuration.GetSection(SwarmConfiguration.SectionName));
+
+// Configure OutputPaths from appsettings
+builder.Services.Configure<OutputPathsConfiguration>(
+    builder.Configuration.GetSection(OutputPathsConfiguration.SectionName));
 
 // Add Semantic Kernel
 var kernelBuilder = builder.Services.AddKernel();
@@ -204,6 +211,14 @@ builder.Services.AddHealthChecks()
 
 var app = builder.Build();
 
+// Initialize output directories
+var outputPathsConfig = app.Configuration.GetSection(OutputPathsConfiguration.SectionName).Get<OutputPathsConfiguration>();
+if (outputPathsConfig != null)
+{
+    outputPathsConfig.EnsureDirectoriesExist();
+    app.Logger.LogInformation("✅ Initialized output directories under: {RootDirectory}", outputPathsConfig.RootDirectory);
+}
+
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
 {
@@ -220,7 +235,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseStatusCodePagesWithReExecute("/not-found", createScopeForErrors: true);
 
-app.UseHttpsRedirection();
+// HTTPS redirection removed - we only listen on HTTPS
 
 app.UseAntiforgery();
 

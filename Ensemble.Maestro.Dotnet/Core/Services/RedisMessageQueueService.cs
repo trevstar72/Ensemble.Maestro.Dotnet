@@ -1,31 +1,52 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using StackExchange.Redis;
+using Microsoft.Extensions.Configuration;
 
 namespace Ensemble.Maestro.Dotnet.Core.Services;
 
 /// <summary>
 /// Redis-based message queue service implementation with 2KB size limits and swarm coordination
 /// </summary>
-public class RedisMessageQueueService : IRedisMessageQueueService
+public class RedisMessageQueueService : IRedisMessageQueueService, IDisposable
 {
     private readonly ILogger<RedisMessageQueueService> _logger;
+    private readonly IQueueNamingService _queueNaming;
     private readonly JsonSerializerOptions _jsonOptions;
+    private readonly ConnectionMultiplexer _redis;
+    private readonly IDatabase _database;
+    private readonly ISubscriber _subscriber;
+    
     private const int DEFAULT_MAX_SIZE_BYTES = 2048; // 2KB limit for swarm coordination
-    private const string QUEUE_PREFIX = "maestro:queue:";
-    private const string STATS_PREFIX = "maestro:stats:";
+    // Queue naming constants moved to QueueNamingService for centralization
     private const string PUBSUB_PREFIX = "maestro:pubsub:";
-    private const string CONFIG_PREFIX = "maestro:config:";
 
-    public RedisMessageQueueService(ILogger<RedisMessageQueueService> logger)
+    public RedisMessageQueueService(ILogger<RedisMessageQueueService> logger, IQueueNamingService queueNaming, IConfiguration configuration)
     {
         _logger = logger;
+        _queueNaming = queueNaming;
         _jsonOptions = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
             WriteIndented = false, // Minimize size
             DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
         };
+        
+        try
+        {
+            var connectionString = configuration.GetConnectionString("Redis") ?? "localhost:6379";
+            _redis = ConnectionMultiplexer.Connect(connectionString);
+            _database = _redis.GetDatabase();
+            _subscriber = _redis.GetSubscriber();
+            
+            _logger.LogInformation("Redis: Connected to {ConnectionString}", connectionString);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Redis: Failed to connect to Redis");
+            throw;
+        }
     }
 
     public async Task<MessageQueueResult> SendMessageAsync(
@@ -56,9 +77,9 @@ public class RedisMessageQueueService : IRedisMessageQueueService
                 MaxRetries = config.MaxRetries
             };
 
-            // TODO: Implement actual Redis list operations
-            // For now, simulate the operation
-            await Task.CompletedTask;
+            // Send message to Redis list (FIFO queue)
+            var serializedMessage = JsonSerializer.Serialize(queueItem, _jsonOptions);
+            await _database.ListRightPushAsync(queueName, serializedMessage);
             
             _logger.LogInformation("Redis: Sent message {MessageId} to queue {QueueName} ({MessageSize} bytes)", 
                 messageId, queueName, result.MessageSizeBytes);
@@ -92,11 +113,18 @@ public class RedisMessageQueueService : IRedisMessageQueueService
         TimeSpan? expiration = null,
         CancellationToken cancellationToken = default)
     {
+        _logger.LogInformation("🚀 REDIS SEND: SendPriorityMessageAsync ENTRY - QueueName: {QueueName}, Priority: {Priority}, MessageType: {MessageType}", 
+            queueName, priority, message?.GetType().Name ?? "NULL");
+            
         try
         {
             var config = await GetQueueConfigAsync(queueName, cancellationToken);
+            _logger.LogInformation("📋 REDIS SEND: Queue config retrieved - EnablePriority: {EnablePriority}, MaxSize: {MaxSize}", 
+                config.EnablePriority, config.MaxMessageSizeBytes);
+                
             if (!config.EnablePriority)
             {
+                _logger.LogError("❌ REDIS SEND: Priority queue not enabled for {QueueName}", queueName);
                 return new MessageQueueResult
                 {
                     Success = false,
@@ -105,15 +133,49 @@ public class RedisMessageQueueService : IRedisMessageQueueService
             }
 
             var result = await SerializeAndValidateMessage(message, config.MaxMessageSizeBytes);
-            if (!result.Success) return result;
+            if (!result.Success) 
+            {
+                _logger.LogError("❌ REDIS SEND: Message serialization failed for {QueueName}: {Error}", queueName, result.ErrorMessage);
+                return result;
+            }
+            _logger.LogInformation("✅ REDIS SEND: Message serialized successfully - Size: {Size} bytes, Truncated: {Truncated}", 
+                result.MessageSizeBytes, result.WasTruncated);
 
             var messageId = Guid.NewGuid().ToString("N");
             
-            // TODO: Implement Redis sorted set for priority queue
-            await Task.CompletedTask;
+            var messageQueueItem = new MessageQueueItem<object>
+            {
+                Id = messageId,
+                Data = message,
+                Timestamp = DateTime.UtcNow,
+                ExpiresAt = DateTime.UtcNow.Add(expiration ?? config.DefaultExpiration),
+                Priority = priority,
+                QueueName = queueName,
+                MaxRetries = config.MaxRetries
+            };
             
-            _logger.LogInformation("Redis: Sent priority message {MessageId} to queue {QueueName} (priority {Priority}, {MessageSize} bytes)", 
-                messageId, queueName, priority, result.MessageSizeBytes);
+            // Send priority message to Redis sorted set - CENTRALIZED: Use QueueNamingService
+            var priorityScore = priority * 1000000 + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var priorityQueueKey = _queueNaming.GetPriorityQueueKey(queueName);
+            
+            _logger.LogInformation("📦 REDIS SEND: About to write to Redis - ExactQueueKey: '{PriorityQueueKey}', Score: {Score}, MessageId: {MessageId}", 
+                priorityQueueKey, priorityScore, messageId);
+            _logger.LogInformation("🔧 REDIS SEND: CENTRALIZED QUEUE NAMING - QueueName: '{QueueName}' → PriorityQueueKey: '{PriorityQueueKey}'", 
+                queueName, priorityQueueKey);
+                
+            var serializedMessage = JsonSerializer.Serialize(messageQueueItem, _jsonOptions);
+            _logger.LogDebug("📄 REDIS SEND: Serialized message preview: {MessagePreview}...", 
+                serializedMessage.Length > 200 ? serializedMessage.Substring(0, 200) : serializedMessage);
+                
+            await _database.SortedSetAddAsync(priorityQueueKey, serializedMessage, priorityScore);
+            
+            _logger.LogInformation("✅ REDIS SEND: Successfully wrote to Redis SortedSet '{PriorityQueueKey}' - MessageId: {MessageId}, Priority: {Priority}, Size: {MessageSize} bytes", 
+                priorityQueueKey, messageId, priority, result.MessageSizeBytes);
+                
+            // Verify the message was actually stored
+            var verifyCount = await _database.SortedSetLengthAsync(priorityQueueKey);
+            _logger.LogInformation("✅ REDIS SEND: Verification - Queue '{PriorityQueueKey}' now has {Count} total messages", 
+                priorityQueueKey, verifyCount);
 
             await UpdateQueueStatsAsync(queueName, "sent", result.MessageSizeBytes, cancellationToken);
 
@@ -128,7 +190,8 @@ public class RedisMessageQueueService : IRedisMessageQueueService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to send priority message to queue {QueueName}", queueName);
+            _logger.LogError(ex, "Redis: Failed to send priority message to queue {QueueName} - {ErrorMessage}", queueName, ex.Message);
+            _logger.LogError("Redis: Exception Details - Type: {ExceptionType}, Stack: {StackTrace}", ex.GetType().Name, ex.StackTrace);
             return new MessageQueueResult 
             { 
                 Success = false, 
@@ -144,15 +207,56 @@ public class RedisMessageQueueService : IRedisMessageQueueService
     {
         try
         {
-            // TODO: Implement Redis BRPOP or similar for non-blocking receive
-            await Task.CompletedTask;
+            var config = await GetQueueConfigAsync(queueName, cancellationToken);
+            MessageQueueItem<T>? messageItem = null;
             
-            _logger.LogDebug("Redis: Received message from queue {QueueName}", queueName);
+            // Try priority queue first (sorted set) - get highest priority (highest score)  
+            if (config.EnablePriority)
+            {
+                var priorityKey = _queueNaming.GetPriorityQueueKey(queueName);
+                var priorityMessages = await _database.SortedSetRangeByScoreWithScoresAsync(
+                    priorityKey, 
+                    order: Order.Descending, 
+                    take: 1
+                );
+                
+                if (priorityMessages.Length > 0)
+                {
+                    var priorityEntry = priorityMessages[0];
+                    var removed = await _database.SortedSetRemoveAsync(priorityKey, priorityEntry.Element);
+                    if (removed)
+                    {
+                        messageItem = JsonSerializer.Deserialize<MessageQueueItem<T>>(priorityEntry.Element!, _jsonOptions);
+                        _logger.LogDebug("Redis: Received priority message from queue {QueueName}", queueName);
+                    }
+                }
+            }
+
+            // Fallback to regular FIFO queue (list) if no priority message
+            if (messageItem == null)
+            {
+                var queueKey = _queueNaming.GetRegularQueueKey(queueName);
+                var regularMessage = await _database.ListLeftPopAsync(queueKey);
+                if (regularMessage.HasValue)
+                {
+                    messageItem = JsonSerializer.Deserialize<MessageQueueItem<T>>(regularMessage!, _jsonOptions);
+                    _logger.LogDebug("Redis: Received FIFO message from queue {QueueName}", queueName);
+                }
+            }
             
-            await UpdateQueueStatsAsync(queueName, "received", 0, cancellationToken);
+            if (messageItem != null)
+            {
+                await UpdateQueueStatsAsync(queueName, "received", 0, cancellationToken);
+                
+                // Check if message has expired
+                if (messageItem.ExpiresAt <= DateTime.UtcNow)
+                {
+                    _logger.LogWarning("Redis: Message {MessageId} expired, discarding", messageItem.Id);
+                    return null;
+                }
+            }
             
-            // Simulate no message available
-            return null;
+            return messageItem;
         }
         catch (Exception ex)
         {
@@ -168,18 +272,86 @@ public class RedisMessageQueueService : IRedisMessageQueueService
     {
         try
         {
-            // TODO: Implement Redis BRPOP with timeout for blocking receive
-            await Task.Delay(100, cancellationToken); // Simulate wait
+            var config = await GetQueueConfigAsync(queueName, cancellationToken);
+            var startTime = DateTime.UtcNow;
+            var maxWaitTime = timeout.TotalMilliseconds > 0 ? timeout : TimeSpan.FromSeconds(30);
             
-            _logger.LogDebug("Redis: Blocking receive from queue {QueueName} with timeout {Timeout}", 
-                queueName, timeout);
+            // Use polling approach with shorter intervals for blocking operations
+            var pollInterval = TimeSpan.FromMilliseconds(100);
             
-            // Simulate no message available after timeout
+            while (DateTime.UtcNow - startTime < maxWaitTime && !cancellationToken.IsCancellationRequested)
+            {
+                MessageQueueItem<T>? messageItem = null;
+                
+                // Try priority queue first (sorted set) - get highest priority (highest score)
+                if (config.EnablePriority)
+                {
+                    var priorityKey = _queueNaming.GetPriorityQueueKey(queueName);
+                    var priorityMessages = await _database.SortedSetRangeByScoreWithScoresAsync(
+                        priorityKey, 
+                        order: Order.Descending, 
+                        take: 1
+                    );
+                    
+                    if (priorityMessages.Length > 0)
+                    {
+                        var priorityEntry = priorityMessages[0];
+                        var removed = await _database.SortedSetRemoveAsync(priorityKey, priorityEntry.Element);
+                        if (removed)
+                        {
+                            messageItem = JsonSerializer.Deserialize<MessageQueueItem<T>>(priorityEntry.Element!, _jsonOptions);
+                            _logger.LogDebug("Redis: Received priority message from queue {QueueName} (blocking)", queueName);
+                        }
+                    }
+                }
+                
+                // Fallback to regular FIFO queue (list) if no priority message
+                if (messageItem == null)
+                {
+                    var queueKey = _queueNaming.GetRegularQueueKey(queueName);
+                    var result = await _database.ListLeftPopAsync(queueKey);
+                    if (result.HasValue)
+                    {
+                        messageItem = JsonSerializer.Deserialize<MessageQueueItem<T>>(result!, _jsonOptions);
+                        _logger.LogDebug("Redis: Received FIFO message from queue {QueueName} (blocking)", queueName);
+                    }
+                }
+                
+                // If we got a message, process it
+                if (messageItem != null)
+                {
+                    await UpdateQueueStatsAsync(queueName, "received", 0, cancellationToken);
+                    
+                    // Check if message has expired
+                    if (messageItem.ExpiresAt <= DateTime.UtcNow)
+                    {
+                        _logger.LogWarning("Redis: Message {MessageId} expired, discarding", messageItem.Id);
+                        continue; // Try again for a non-expired message
+                    }
+                    
+                    return messageItem;
+                }
+                
+                // Wait before next poll
+                try
+                {
+                    await Task.Delay(pollInterval, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.LogDebug("Redis: Blocking receive cancelled for queue {QueueName}", queueName);
+                    break;
+                }
+            }
+            
+            // Timeout reached or cancelled
+            _logger.LogDebug("Redis: No message received from queue {QueueName} within timeout {Timeout}ms", 
+                queueName, maxWaitTime.TotalMilliseconds);
             return null;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to receive blocking message from queue {QueueName}", queueName);
+            _logger.LogError(ex, "Redis: Failed to receive blocking message from queue {QueueName}", queueName);
             return null;
         }
     }
@@ -307,10 +479,36 @@ public class RedisMessageQueueService : IRedisMessageQueueService
         string channel, 
         CancellationToken cancellationToken = default) where T : class
     {
-        _logger.LogInformation("Redis: Subscribing to channel {Channel}", channel);
-        
-        // TODO: Implement Redis SUBSCRIBE
-        return GetEmptyAsyncEnumerable<T>();
+        try
+        {
+            _logger.LogInformation("Redis: Subscribing to channel {Channel}", channel);
+            
+            await _subscriber.SubscribeAsync(channel, (redisChannel, value) =>
+            {
+                try
+                {
+                    if (!value.HasValue) return;
+                    
+                    var message = JsonSerializer.Deserialize<MessageQueueItem<T>>(value!, _jsonOptions);
+                    if (message != null)
+                    {
+                        _logger.LogDebug("Redis: Received message on channel {Channel}", channel);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Redis: Failed to process message on channel {Channel}", channel);
+                }
+            });
+            
+            _logger.LogInformation("Redis: Successfully subscribed to channel {Channel}", channel);
+            return ConsumeMessages<T>(channel, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Redis: Failed to subscribe to channel {Channel}", channel);
+            return ConsumeMessages<T>(channel, cancellationToken);
+        }
     }
 
     public async Task<bool> CreateQueueAsync(
@@ -320,19 +518,68 @@ public class RedisMessageQueueService : IRedisMessageQueueService
     {
         try
         {
-            var config = configuration ?? new QueueConfiguration();
+            // Use provided config, fallback to predefined, or default
+            var config = configuration ?? 
+                         (_queueConfigurations.TryGetValue(queueName, out var predefined) ? predefined : new QueueConfiguration());
             
-            // TODO: Store queue configuration in Redis
-            await Task.CompletedTask;
+            // Store queue configuration in Redis
+            var configKey = _queueNaming.GetQueueConfigKey(queueName);
+            var serializedConfig = JsonSerializer.Serialize(config, _jsonOptions);
+            await _database.StringSetAsync(configKey, serializedConfig, TimeSpan.FromHours(24));
             
-            _logger.LogInformation("Redis: Created queue {QueueName} with max size {MaxSize} bytes", 
-                queueName, config.MaxMessageSizeBytes);
+            // Initialize queue statistics
+            var statsKey = _queueNaming.GetQueueStatsKey(queueName);
+            var initialStats = new Dictionary<string, string>
+            {
+                ["created_at"] = DateTimeOffset.UtcNow.ToString("O"),
+                ["total_sent"] = "0",
+                ["total_received"] = "0",
+                ["total_acknowledged"] = "0",
+                ["total_rejected"] = "0",
+                ["current_depth"] = "0",
+                ["max_depth"] = "0",
+                ["last_activity"] = DateTimeOffset.UtcNow.ToString("O")
+            };
+            
+            await _database.HashSetAsync(statsKey, initialStats.Select(kvp => new HashEntry(kvp.Key, kvp.Value)).ToArray());
+            
+            // Initialize queue keys if they don't exist
+            var queueKey = _queueNaming.GetRegularQueueKey(queueName);
+            
+            // For priority queues, also initialize the priority sorted set
+            if (config.EnablePriority)
+            {
+                var priorityKey = $"{queueKey}:priority";
+                // Touch the sorted set to ensure it exists (no-op if already exists)
+                await _database.SortedSetScoreAsync(priorityKey, "init");
+                
+                _logger.LogInformation("Redis: Created priority queue {QueueName} with max size {MaxSize} bytes", 
+                    queueName, config.MaxMessageSizeBytes);
+            }
+            else
+            {
+                // Touch the list to ensure it exists (no-op if already exists)
+                await _database.ListLengthAsync(queueKey);
+                
+                _logger.LogInformation("Redis: Created FIFO queue {QueueName} with max size {MaxSize} bytes", 
+                    queueName, config.MaxMessageSizeBytes);
+            }
+            
+            // Set queue expiration if configured
+            if (config.DefaultExpiration > TimeSpan.Zero)
+            {
+                await _database.KeyExpireAsync(queueKey, config.DefaultExpiration);
+                if (config.EnablePriority)
+                {
+                    await _database.KeyExpireAsync($"{queueKey}:priority", config.DefaultExpiration);
+                }
+            }
             
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to create queue {QueueName}", queueName);
+            _logger.LogError(ex, "Redis: Failed to create queue {QueueName}", queueName);
             return false;
         }
     }
@@ -499,19 +746,114 @@ public class RedisMessageQueueService : IRedisMessageQueueService
         return truncatedObject;
     }
 
+    private readonly Dictionary<string, QueueConfiguration> _queueConfigurations = new()
+    {
+        // Enable priority queues for swarm coordination queues
+        ["swarm.codeunit.assignments"] = new QueueConfiguration 
+        { 
+            EnablePriority = true,
+            MaxMessageSizeBytes = 16384, // Increased from 2048 to handle complex CodeUnitAssignmentMessages
+            MaxQueueSize = 10000,
+            DefaultExpiration = TimeSpan.FromHours(4),
+            MaxRetries = 3
+        },
+        ["swarm.spawn.requests"] = new QueueConfiguration 
+        { 
+            EnablePriority = true,
+            MaxMessageSizeBytes = 1024,
+            MaxQueueSize = 5000,
+            DefaultExpiration = TimeSpan.FromHours(2),
+            MaxRetries = 3
+        },
+        ["swarm.completions"] = new QueueConfiguration 
+        { 
+            EnablePriority = true,
+            MaxMessageSizeBytes = 2048,
+            MaxQueueSize = 10000,
+            DefaultExpiration = TimeSpan.FromHours(1),
+            MaxRetries = 2
+        },
+        ["swarm.function.assignments"] = new QueueConfiguration 
+        { 
+            EnablePriority = true,
+            MaxMessageSizeBytes = 1536,
+            MaxQueueSize = 8000,
+            DefaultExpiration = TimeSpan.FromHours(2),
+            MaxRetries = 3
+        },
+        ["swarm.workload.distribution"] = new QueueConfiguration 
+        { 
+            EnablePriority = true,
+            MaxMessageSizeBytes = 1024,
+            MaxQueueSize = 5000,
+            DefaultExpiration = TimeSpan.FromHours(1),
+            MaxRetries = 2
+        },
+        ["builder.notifications"] = new QueueConfiguration 
+        { 
+            EnablePriority = true,
+            MaxMessageSizeBytes = 1024,
+            MaxQueueSize = 3000,
+            DefaultExpiration = TimeSpan.FromMinutes(30),
+            MaxRetries = 2
+        },
+        ["builder.errors"] = new QueueConfiguration 
+        { 
+            EnablePriority = false, // Error queues use FIFO
+            MaxMessageSizeBytes = 2048,
+            MaxQueueSize = 5000,
+            DefaultExpiration = TimeSpan.FromHours(24),
+            MaxRetries = 1
+        }
+    };
+
     private async Task<QueueConfiguration> GetQueueConfigAsync(string queueName, CancellationToken cancellationToken)
     {
         try
         {
-            // TODO: Retrieve configuration from Redis
-            await Task.CompletedTask;
+            // First try to get from Redis
+            var configKey = _queueNaming.GetQueueConfigKey(queueName);
+            var configValue = await _database.StringGetAsync(configKey);
             
-            // Return default configuration for now
+            if (configValue.HasValue)
+            {
+                var config = JsonSerializer.Deserialize<QueueConfiguration>(configValue!, _jsonOptions);
+                if (config != null)
+                {
+                    _logger.LogDebug("Redis: Retrieved configuration for queue {QueueName} from Redis", queueName);
+                    return config;
+                }
+            }
+            
+            // Fallback to in-memory configuration
+            if (_queueConfigurations.TryGetValue(queueName, out var inMemoryConfig))
+            {
+                _logger.LogDebug("Redis: Using in-memory configuration for queue {QueueName}", queueName);
+                
+                // Store the configuration in Redis for future use
+                await _database.StringSetAsync(
+                    configKey, 
+                    JsonSerializer.Serialize(inMemoryConfig, _jsonOptions), 
+                    TimeSpan.FromHours(24)
+                );
+                
+                return inMemoryConfig;
+            }
+            
+            // Return default configuration as last resort
+            _logger.LogWarning("Redis: No configuration found for queue {QueueName}, using default", queueName);
             return new QueueConfiguration();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to get configuration for queue {QueueName}, using defaults", queueName);
+            _logger.LogError(ex, "Redis: Failed to get configuration for queue {QueueName}, using defaults", queueName);
+            
+            // Try fallback to in-memory config even on error
+            if (_queueConfigurations.TryGetValue(queueName, out var fallbackConfig))
+            {
+                return fallbackConfig;
+            }
+            
             return new QueueConfiguration();
         }
     }
@@ -532,10 +874,151 @@ public class RedisMessageQueueService : IRedisMessageQueueService
         }
     }
 
-    private static async IAsyncEnumerable<MessageQueueItem<T>> GetEmptyAsyncEnumerable<T>([EnumeratorCancellation] CancellationToken cancellationToken = default) where T : class
+    private async IAsyncEnumerable<MessageQueueItem<T>> ConsumeMessages<T>(
+        string queueName, 
+        [EnumeratorCancellation] CancellationToken cancellationToken = default) where T : class
     {
-        await Task.CompletedTask;
-        yield break;
+        _logger.LogInformation("Redis: ConsumeMessages<{Type}> started for queue {QueueName}", typeof(T).Name, queueName);
+        
+        var iterationCount = 0;
+        var totalMessagesConsumed = 0;
+        
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            iterationCount++;
+            MessageQueueItem<T>? messageItem = null;
+            
+            try
+            {
+                _logger.LogDebug("Redis: ConsumeMessages iteration #{IterationCount} for queue {QueueName} - checking for messages", iterationCount, queueName);
+                
+                // Check priority queue first (sorted set) - get highest priority (highest score)
+                var priorityQueueKey = _queueNaming.GetPriorityQueueKey(queueName);
+                _logger.LogDebug("Redis: Checking priority queue {PriorityQueueKey}", priorityQueueKey);
+                var priorityMessages = await _database.SortedSetRangeByScoreWithScoresAsync(priorityQueueKey, 
+                    order: Order.Descending, take: 1);
+                
+                if (priorityMessages.Length > 0)
+                {
+                    _logger.LogInformation("Redis: Found {MessageCount} priority messages in queue {QueueName}", priorityMessages.Length, queueName);
+                    
+                    var priorityEntry = priorityMessages[0];
+                    _logger.LogDebug("Redis: Attempting to remove priority message with score {Score} from queue {QueueName}", priorityEntry.Score, queueName);
+                    
+                    var removed = await _database.SortedSetRemoveAsync(priorityQueueKey, priorityEntry.Element);
+                    if (removed)
+                    {
+                        _logger.LogInformation("Redis: Successfully removed priority message from queue {QueueName}, deserializing...", queueName);
+                        
+                        try
+                        {
+                            messageItem = JsonSerializer.Deserialize<MessageQueueItem<T>>(priorityEntry.Element!, _jsonOptions);
+                            if (messageItem != null)
+                            {
+                                totalMessagesConsumed++;
+                                _logger.LogInformation("Redis: Successfully deserialized priority message #{MessageCount} from {QueueName} - MessageId: {MessageId}, Type: {DataType}", 
+                                    totalMessagesConsumed, queueName, messageItem.Id, messageItem.Data?.GetType().Name ?? "NULL");
+                            }
+                            else
+                            {
+                                _logger.LogWarning("Redis: Priority message deserialized to NULL from queue {QueueName}", queueName);
+                            }
+                        }
+                        catch (JsonException jsonEx)
+                        {
+                            _logger.LogError(jsonEx, "Redis: JSON deserialization failed for priority message from queue {QueueName}: {JsonError}", queueName, jsonEx.Message);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Redis: Failed to remove priority message from queue {QueueName} (already consumed by another process?)", queueName);
+                    }
+                }
+                else
+                {
+                    _logger.LogDebug("Redis: No priority messages found in queue {QueueName}", queueName);
+                }
+
+                // Fallback to regular FIFO queue (list) if no priority message
+                if (messageItem == null)
+                {
+                    _logger.LogDebug("Redis: Checking regular FIFO queue {QueueName}", queueName);
+                    var regularMessage = await _database.ListLeftPopAsync(queueName);
+                    if (regularMessage.HasValue)
+                    {
+                        _logger.LogInformation("Redis: Found regular message in FIFO queue {QueueName}, deserializing...", queueName);
+                        
+                        try
+                        {
+                            messageItem = JsonSerializer.Deserialize<MessageQueueItem<T>>(regularMessage!, _jsonOptions);
+                            if (messageItem != null)
+                            {
+                                totalMessagesConsumed++;
+                                _logger.LogInformation("Redis: Successfully deserialized regular message #{MessageCount} from {QueueName} - MessageId: {MessageId}", 
+                                    totalMessagesConsumed, queueName, messageItem.Id);
+                            }
+                        }
+                        catch (JsonException jsonEx)
+                        {
+                            _logger.LogError(jsonEx, "Redis: JSON deserialization failed for regular message from queue {QueueName}: {JsonError}", queueName, jsonEx.Message);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogDebug("Redis: No regular messages found in FIFO queue {QueueName}", queueName);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("Redis: ConsumeMessages cancelled for queue {QueueName} after {Iterations} iterations, {TotalConsumed} messages consumed", 
+                    queueName, iterationCount, totalMessagesConsumed);
+                yield break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Redis: CRITICAL ERROR in ConsumeMessages for queue {QueueName} at iteration #{IterationCount}: {ExceptionType} - {ExceptionMessage}", 
+                    queueName, iterationCount, ex.GetType().Name, ex.Message);
+                _logger.LogDebug(ex, "Redis: Full exception details for queue {QueueName}: {StackTrace}", queueName, ex.StackTrace);
+                
+                _logger.LogInformation("Redis: Waiting 5 seconds before retrying after error in queue {QueueName}", queueName);
+                await Task.Delay(5000, cancellationToken); // Wait longer on error
+                continue;
+            }
+
+            if (messageItem != null)
+            {
+                _logger.LogInformation("Redis: YIELDING message #{MessageCount} with ID {MessageId} to consumer for queue {QueueName}", 
+                    totalMessagesConsumed, messageItem.Id, queueName);
+                yield return messageItem;
+                _logger.LogDebug("Redis: Message #{MessageCount} successfully yielded and control returned from consumer", totalMessagesConsumed);
+            }
+            else
+            {
+                // No messages available, wait before polling again
+                if (iterationCount % 10 == 0) // Log every 10th empty poll to avoid spam
+                {
+                    _logger.LogDebug("Redis: No messages available in queue {QueueName} after {Iterations} iterations - waiting 1 second", queueName, iterationCount);
+                }
+                await Task.Delay(1000, cancellationToken);
+            }
+        }
+        
+        _logger.LogInformation("Redis: ConsumeMessages stopped for queue {QueueName} after {Iterations} iterations, {TotalConsumed} total messages consumed", 
+            queueName, iterationCount, totalMessagesConsumed);
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            _redis?.Dispose();
+            _logger.LogInformation("Redis: Connection disposed");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Redis: Error disposing connection");
+        }
     }
 
     #endregion

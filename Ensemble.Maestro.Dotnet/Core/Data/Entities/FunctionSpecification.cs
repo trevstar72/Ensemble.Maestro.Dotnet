@@ -19,27 +19,23 @@ public class FunctionSpecification
     public Guid CrossReferenceId { get; set; }
     
     /// <summary>
-    /// Project this specification belongs to
+    /// Project this specification belongs to (nullable for MVP)
     /// </summary>
-    [ForeignKey(nameof(Project))]
-    public Guid ProjectId { get; set; }
+    public Guid? ProjectId { get; set; }
     
     /// <summary>
     /// Module this specification belongs to (if applicable)
     /// </summary>
-    [ForeignKey(nameof(Module))]
     public Guid? ModuleId { get; set; }
     
     /// <summary>
-    /// Pipeline execution that created this specification
+    /// Pipeline execution that created this specification (nullable for MVP)
     /// </summary>
-    [ForeignKey(nameof(PipelineExecution))]
-    public Guid PipelineExecutionId { get; set; }
+    public Guid? PipelineExecutionId { get; set; }
     
     /// <summary>
-    /// Agent execution that created this specification
+    /// Agent execution that created this specification (nullable for MVP)
     /// </summary>
-    [ForeignKey(nameof(AgentExecution))]
     public Guid? AgentExecutionId { get; set; }
     
     /// <summary>

@@ -34,6 +34,31 @@ Include:
 - Performance design with caching strategies
 - Scalability design for horizontal/vertical scaling
 
+CRITICAL: Include detailed function specifications in the following format for each component:
+
+## Function Specifications
+
+For each major component, define specific functions with:
+
+**FunctionName(parameters): returnType**
+- Description: Clear description of what the function does
+- Input Parameters: Detailed parameter specifications
+- Return Type: Expected return type and structure
+- Business Logic: Core logic requirements
+- Error Handling: Exception scenarios and handling
+- Complexity Rating: 1-10 scale
+- Estimated Minutes: Development time estimate
+
+Example:
+**CreateTask(title: string, description: string, userId: Guid): TaskResult**
+- Description: Creates a new task for the specified user
+- Input Parameters: title (required), description (optional), userId (required)
+- Return Type: TaskResult with success status and task ID
+- Business Logic: Validate user exists, create task entity, assign unique ID
+- Error Handling: UserNotFoundException, InvalidTaskDataException
+- Complexity Rating: 3
+- Estimated Minutes: 45
+
 Provide specific, implementable technical specifications formatted in clear markdown.";
         
         var result = await ExecuteLLMCall(systemPrompt, context, cancellationToken);

@@ -21,7 +21,7 @@ public class AgentFactory : IAgentFactory
         { "Planning", new[] { "Planner", "Architect", "Analyst" } },
         { "Designing", new[] { "Designer", "UIDesigner", "APIDesigner" } },
         { "Swarming", new[] { "MethodAgent" } },
-        { "Building", new[] { "Builder", "CodeGenerator", "Compiler" } },
+        { "Building", new[] { "EnhancedBuilder" } },
         { "Validating", new[] { "Validator", "Tester", "QualityAssurance" } }
     };
     
@@ -40,11 +40,8 @@ public class AgentFactory : IAgentFactory
         // Swarming agents
         { "MethodAgent", typeof(MethodAgent) },
         
-        // Building agents
-        { "Builder", typeof(BuilderAgent) },
+        // Building agents (New Swarm Architecture)
         { "EnhancedBuilder", typeof(EnhancedBuilderAgent) },
-        { "CodeGenerator", typeof(CodeGeneratorAgent) },
-        { "Compiler", typeof(CompilerAgent) },
         
         // Validating agents
         { "Validator", typeof(ValidatorAgent) },
@@ -69,7 +66,7 @@ public class AgentFactory : IAgentFactory
         try
         {
             // Get logger for the specific agent type
-            var loggerType = typeof(ILogger<>).MakeGenericType(typeof(BaseAgent));
+            var loggerType = typeof(ILogger<>).MakeGenericType(agentTypeClass);
             var logger = _serviceProvider.GetRequiredService(loggerType);
             
             // Get LLM service

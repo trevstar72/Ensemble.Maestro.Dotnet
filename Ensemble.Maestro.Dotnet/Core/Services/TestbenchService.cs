@@ -83,7 +83,18 @@ public class TestbenchService
         _logger.LogInformation("Starting pipeline execution {PipelineId} for project {ProjectId} with {TotalAgents} total agents", 
             pipeline.Id, projectId, totalAgentCount);
 
-        _ = Task.Run(() => ExecutePipelineAsync(pipeline.Id, updatedConfig));
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ExecutePipelineAsync(pipeline.Id, updatedConfig);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Pipeline execution {PipelineId} failed with exception: {ErrorMessage}", pipeline.Id, ex.Message);
+                await FailPipelineAsync(pipeline.Id, ex.Message);
+            }
+        });
 
         return pipeline;
     }
@@ -206,21 +217,45 @@ public class TestbenchService
 
     private async Task ExecutePipelineAsync(Guid pipelineId, TestConfiguration config)
     {
+        _logger.LogInformation("🚀 ExecutePipelineAsync STARTED for pipeline {PipelineId}", pipelineId);
+        _logger.LogInformation("🔍 DEBUG: About to enter try block for pipeline {PipelineId}", pipelineId);
         try
         {
+            _logger.LogInformation("🔍 DEBUG: Inside try block, creating stages array for pipeline {PipelineId}", pipelineId);
             var stages = new[] { "Planning", "Designing", "Swarming", "Building", "Validating" };
+            _logger.LogInformation("🔍 DEBUG: Stages array created successfully for pipeline {PipelineId}", pipelineId);
+            _logger.LogInformation("📋 Pipeline {PipelineId} will execute {StageCount} stages: {Stages}", 
+                pipelineId, stages.Length, string.Join(", ", stages));
+            
+            _logger.LogInformation("🔍 DEBUG: About to start for-loop for {StageCount} stages", stages.Length);
             
             for (int i = 0; i < stages.Length; i++)
             {
+                _logger.LogInformation("🔍 DEBUG: For-loop iteration {Iteration}, processing stage index {StageIndex}", i + 1, i);
                 var stage = stages[i];
+                _logger.LogInformation("🔍 DEBUG: Stage name retrieved: {StageName}", stage);
+                _logger.LogInformation("▶️ Pipeline {PipelineId} starting stage {StageIndex}/{TotalStages}: {StageName}", 
+                    pipelineId, i + 1, stages.Length, stage);
+                
+                _logger.LogInformation("🔍 DEBUG: About to call ExecuteStageAsync for stage {StageName}", stage);
                 await ExecuteStageAsync(pipelineId, stage, i + 1, config);
+                _logger.LogInformation("🔍 DEBUG: ExecuteStageAsync COMPLETED for stage {StageName}", stage);
+                
+                _logger.LogInformation("✅ Pipeline {PipelineId} completed stage {StageIndex}/{TotalStages}: {StageName}", 
+                    pipelineId, i + 1, stages.Length, stage);
                 
                 // Check if execution was cancelled
                 var pipelineResult = await _pipelineExecutionRepository.GetByIdAsync(pipelineId);
-                if (pipelineResult.IsSuccess && pipelineResult.Value?.Status == "Cancelled") return;
+                if (pipelineResult.IsSuccess && pipelineResult.Value?.Status == "Cancelled") 
+                {
+                    _logger.LogWarning("⏹️ Pipeline {PipelineId} was cancelled, stopping execution", pipelineId);
+                    return;
+                }
             }
 
+            _logger.LogInformation("🏁 Pipeline {PipelineId} completing - all stages finished", pipelineId);
             await CompletePipelineAsync(pipelineId);
+            _logger.LogInformation("✨ Pipeline {PipelineId} completed successfully", pipelineId);
         }
         catch (Exception ex)
         {
@@ -231,7 +266,13 @@ public class TestbenchService
 
     private async Task ExecuteStageAsync(Guid pipelineId, string stageName, int order, TestConfiguration config)
     {
+        _logger.LogInformation("🎯 ExecuteStageAsync ENTRY - Pipeline: {PipelineId}, Stage: {StageName}, Order: {Order}", 
+            pipelineId, stageName, order);
+        _logger.LogInformation("🔍 DEBUG: About to call _pipelineExecutionRepository.GetByIdAsync for pipeline {PipelineId}", pipelineId);
+        
         var pipelineResult = await _pipelineExecutionRepository.GetByIdAsync(pipelineId);
+        
+        _logger.LogInformation("🔍 DEBUG: _pipelineExecutionRepository.GetByIdAsync COMPLETED - Success: {IsSuccess}", pipelineResult.IsSuccess);
         if (!pipelineResult.IsSuccess || pipelineResult.Value == null) return;
 
         var pipeline = pipelineResult.Value;
@@ -253,8 +294,13 @@ public class TestbenchService
         dbContext.StageExecutions.Add(stageExecution);
         await dbContext.SaveChangesAsync();
 
+        _logger.LogInformation("🚀 STAGE EXECUTION: Starting ExecuteStageAgents for {StageName} - StageId: {StageId}, Pipeline: {PipelineId}", 
+            stageName, stageExecution.Id, pipelineId);
+
         // Execute real agents for the stage
         await ExecuteStageAgents(pipelineId, stageExecution.Id, stageName, config);
+
+        _logger.LogInformation("✅ STAGE EXECUTION: ExecuteStageAgents COMPLETED for {StageName} - updating status to Completed", stageName);
 
         stageExecution.Status = "Completed";
         stageExecution.CompletedAt = DateTime.UtcNow;
@@ -267,8 +313,8 @@ public class TestbenchService
 
     private async Task ExecuteStageAgents(Guid pipelineId, Guid stageId, string stageName, TestConfiguration config)
     {
-        _logger.LogInformation("=== Starting stage {StageName} execution ===", stageName);
-        _logger.LogInformation("Pipeline: {PipelineId}, Stage: {StageId}, Project: {ProjectId}", 
+        _logger.LogInformation("🔥 === ExecuteStageAgents ENTRY - Stage: {StageName} ===", stageName);
+        _logger.LogInformation("🔥 Pipeline: {PipelineId}, StageId: {StageId}, ProjectId: {ProjectId}", 
             pipelineId, stageId, config.ProjectId);
             
         using var scope = _serviceScopeFactory.CreateScope();
@@ -299,13 +345,29 @@ public class TestbenchService
 
         try
         {
+            _logger.LogInformation("🔀 STAGE ROUTING: Determining execution path for stage '{StageName}'", stageName);
+            
             // Special handling for Swarming stage - spawn Code Unit Controllers dynamically
             if (stageName == "Swarming")
             {
+                _logger.LogInformation("🐝 SWARMING PATH: Executing ExecuteSwarmStageAsync for {StageName}", stageName);
                 await ExecuteSwarmStageAsync(pipelineId, stageId, config);
+            }
+            // Special handling for Building stage - message-based EnhancedBuilder trigger
+            else if (stageName == "Building")
+            {
+                _logger.LogInformation("🏗️ BUILDING PATH: Executing ExecuteBuildingStageAsync for {StageName}", stageName);
+                await ExecuteBuildingStageAsync(pipelineId, stageId, config);
+            }
+            // Special handling for Designing stage - individual agent execution to trigger ProcessDesignerOutputAsync hook
+            else if (stageName == "Designing")
+            {
+                _logger.LogInformation("🎨 DESIGNING PATH: Executing ExecuteDesigningStageAsync for {StageName}", stageName);
+                await ExecuteDesigningStageAsync(pipelineId, stageId, config);
             }
             else
             {
+                _logger.LogInformation("🔄 TRADITIONAL PATH: Executing ExecuteStageAgentsAsync for {StageName}", stageName);
                 // Execute all agents for this stage using traditional method
                 var executions = await agentExecutionService.ExecuteStageAgentsAsync(
                     config.ProjectId,
@@ -315,7 +377,7 @@ public class TestbenchService
                     context.InputPrompt,
                     context);
                 
-                _logger.LogInformation("Stage {StageName} completed with {ExecutionCount} agent executions", 
+                _logger.LogInformation("✅ TRADITIONAL PATH COMPLETED: Stage {StageName} completed with {ExecutionCount} agent executions", 
                     stageName, executions?.Count ?? 0);
             }
         }
@@ -474,6 +536,105 @@ public class TestbenchService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Swarming stage execution failed: {ErrorMessage}", ex.Message);
+            throw;
+        }
+    }
+
+    private async Task ExecuteBuildingStageAsync(Guid pipelineId, Guid stageId, TestConfiguration config)
+    {
+        _logger.LogInformation("=== Starting Building stage with EnhancedBuilder ===");
+        _logger.LogInformation("Pipeline: {PipelineId}, Stage: {StageId}, Project: {ProjectId}", 
+            pipelineId, stageId, config.ProjectId);
+
+        using var scope = _serviceScopeFactory.CreateScope();
+        var agentExecutionService = scope.ServiceProvider.GetRequiredService<AgentExecutionService>();
+
+        try
+        {
+            // Create execution context for EnhancedBuilder
+            var context = new AgentExecutionContext
+            {
+                ProjectId = config.ProjectId,
+                PipelineExecutionId = pipelineId,
+                StageExecutionId = stageId,
+                Stage = "Building",
+                InputPrompt = "Aggregate individual MethodAgent code documents and build the complete project",
+                TargetLanguage = config.TargetLanguage,
+                DeploymentTarget = config.DeploymentTarget,
+                Parameters = config.Parameters ?? new Dictionary<string, object>()
+            };
+
+            _logger.LogInformation("Executing EnhancedBuilder agent to aggregate MethodAgent outputs...");
+            
+            // Execute only the EnhancedBuilder agent (not the old monolithic agents)
+            var execution = await agentExecutionService.ExecuteAgentAsync(
+                config.ProjectId,
+                pipelineId,
+                stageId,
+                "EnhancedBuilder",
+                context.InputPrompt,
+                context);
+
+            _logger.LogInformation("EnhancedBuilder execution completed with status: {Status}", execution.Status);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Building stage execution failed: {ErrorMessage}", ex.Message);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Execute Designing stage with individual agent execution to trigger ProcessDesignerOutputAsync hook
+    /// </summary>
+    private async Task ExecuteDesigningStageAsync(Guid pipelineId, Guid stageId, TestConfiguration config)
+    {
+        _logger.LogInformation("=== Starting Designing stage with individual agent execution ===");
+        _logger.LogInformation("Pipeline: {PipelineId}, Stage: {StageId}, Project: {ProjectId}", 
+            pipelineId, stageId, config.ProjectId);
+
+        using var scope = _serviceScopeFactory.CreateScope();
+        var agentExecutionService = scope.ServiceProvider.GetRequiredService<AgentExecutionService>();
+
+        try
+        {
+            // Get Designer agent types for this stage
+            var agentTypes = AgentFactory.GetAgentTypesForStage("Designing");
+            _logger.LogInformation("Executing {AgentCount} Designer agents: [{AgentTypes}]", 
+                agentTypes.Length, string.Join(", ", agentTypes));
+
+            foreach (var agentType in agentTypes)
+            {
+                // Create execution context for each Designer agent
+                var context = new AgentExecutionContext
+                {
+                    ProjectId = config.ProjectId,
+                    PipelineExecutionId = pipelineId,
+                    StageExecutionId = stageId,
+                    Stage = "Designing",
+                    InputPrompt = $"Create detailed {agentType} specifications with function definitions for requirements: {GetStageRequirements("Designing")}",
+                    TargetLanguage = config.TargetLanguage,
+                    DeploymentTarget = config.DeploymentTarget,
+                    Parameters = config.Parameters ?? new Dictionary<string, object>()
+                };
+
+                _logger.LogInformation("Executing {AgentType} agent individually to trigger ProcessDesignerOutputAsync hook...", agentType);
+                
+                // Execute each Designer agent individually through ExecuteAgentAsync to trigger the hook
+                var execution = await agentExecutionService.ExecuteAgentAsync(
+                    config.ProjectId,
+                    pipelineId,
+                    stageId,
+                    agentType,
+                    context.InputPrompt,
+                    context);
+
+                _logger.LogInformation("{AgentType} execution completed with status: {Status}", agentType, execution.Status);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Designing stage execution failed: {ErrorMessage}", ex.Message);
             throw;
         }
     }

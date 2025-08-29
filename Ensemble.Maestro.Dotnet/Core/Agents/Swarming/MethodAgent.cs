@@ -46,8 +46,18 @@ public class MethodAgent : BaseAgent, IMethodAgent
         AgentExecutionContext context, 
         CancellationToken cancellationToken)
     {
-        var functionId = Guid.Parse(context.Metadata["FunctionId"].ToString()!);
-        var codeUnitId = Guid.Parse(context.Metadata["CodeUnitId"].ToString()!);
+        // FunctionId is actually the JobId (string format "N") - parse as Guid if possible
+        var functionIdStr = context.Metadata["FunctionId"].ToString()!;
+        var functionId = Guid.TryParse(functionIdStr, out var parsedFunctionId) 
+            ? parsedFunctionId 
+            : Guid.NewGuid(); // fallback for invalid format
+            
+        // CodeUnitId is actually CodeUnitName (string) - not a Guid at all
+        var codeUnitIdStr = context.Metadata["CodeUnitId"].ToString()!;
+        var codeUnitId = Guid.TryParse(codeUnitIdStr, out var parsedCodeUnitId) 
+            ? parsedCodeUnitId 
+            : Guid.NewGuid(); // fallback for non-Guid strings like "TestCodeUnit"
+            
         var complexityRating = context.Metadata.ContainsKey("ComplexityRating") 
             ? Convert.ToInt32(context.Metadata["ComplexityRating"]) 
             : 5;
@@ -470,9 +480,9 @@ Requirements:
 - Add meaningful comments
 - Ensure the implementation is production-ready",
             
-            ProjectId = Guid.Parse(jobPacket.ProjectId),
+            ProjectId = Guid.TryParse(jobPacket.ProjectId, out var parsedProjectId) ? parsedProjectId : Guid.NewGuid(),
             PipelineExecutionId = Guid.NewGuid(),
-            ExecutionId = Guid.Parse(jobPacket.JobId),
+            ExecutionId = Guid.TryParse(jobPacket.JobId, out var parsedJobId) ? parsedJobId : Guid.NewGuid(),
             TargetLanguage = "C#",
             MaxTokens = 4000,
             Temperature = 0.3f,

@@ -51,18 +51,35 @@ public class DesignerOutputStorageService : IDesignerOutputStorageService
 
         try
         {
-            _logger.LogInformation("Storing designer output for agent execution {AgentExecutionId}", agentExecutionId);
+            _logger.LogInformation("🏗️ STORE START: Storing designer output for agent execution {AgentExecutionId}, AgentType: {AgentType}, ProjectId: {ProjectId}", 
+                agentExecutionId, agentType, context.ProjectId);
+            _logger.LogInformation("🏗️ STORE: Designer output length: {Length}, Preview: {Preview}...", 
+                result.OutputResponse?.Length ?? 0, 
+                (result.OutputResponse?.Length ?? 0) > 300 ? result.OutputResponse?.Substring(0, 300) + "..." : result.OutputResponse ?? "");
 
             // 1. Create cross-reference entry first
+            _logger.LogInformation("🏗️ STORE: Creating cross-reference entry...");
             var crossRef = await _crossReferenceService.CreateCrossReferenceAsync(
                 "DesignerOutput", 
                 new { AgentType = agentType, ProjectId = context.ProjectId },
                 cancellationToken);
             
             storageResult.CrossReferenceId = crossRef.PrimaryId;
+            _logger.LogInformation("🏗️ STORE: Cross-reference created with ID: {CrossRefId}", crossRef.PrimaryId);
 
             // 2. Parse function specifications from output
+            _logger.LogInformation("🏗️ STORE: Parsing function specifications from designer output...");
+            
+            if (string.IsNullOrEmpty(result.OutputResponse))
+            {
+                _logger.LogError("🏗️ STORE ERROR: Designer output is null or empty - cannot parse function specifications");
+                storageResult.Success = false;
+                storageResult.ErrorMessage = "Designer output is null or empty";
+                return storageResult;
+            }
+            
             var functionSpecs = await ParseFunctionSpecificationsAsync(result.OutputResponse, context, cancellationToken);
+            _logger.LogInformation("🏗️ STORE: Function specification parsing completed - Found {Count} specs", functionSpecs.Count);
             
             // 3. Extract code units
             var codeUnits = await ExtractCodeUnitsAsync(result.OutputResponse, functionSpecs, context, cancellationToken);
@@ -202,30 +219,42 @@ public class DesignerOutputStorageService : IDesignerOutputStorageService
             }
 
             // 7. Save all to SQL Server
+            _logger.LogInformation("🏗️ STORE: Saving to SQL Server database - {FunctionSpecs} function specs, {CodeUnits} code units", 
+                storedFunctionSpecs.Count, storedCodeUnits.Count);
             await _dbContext.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("🏗️ STORE: SQL Server save completed successfully");
             
             storageResult.DesignerOutputId = designerOutput.Id;
             storageResult.FunctionSpecificationsStored = storedFunctionSpecs.Count;
             storageResult.CodeUnitsStored = storedCodeUnits.Count;
 
             // 8. Store in Neo4j (relationships and graph data)
+            _logger.LogInformation("🏗️ STORE: Storing in Neo4j...");
             await StoreInNeo4jAsync(designerOutput, storedFunctionSpecs, storedCodeUnits, crossRef.PrimaryId, cancellationToken);
+            _logger.LogInformation("🏗️ STORE: Neo4j storage completed successfully");
 
             // 9. Store in Elasticsearch (full-text search)
+            _logger.LogInformation("🏗️ STORE: Storing in Elasticsearch...");
             await StoreInElasticsearchAsync(designerOutput, storedFunctionSpecs, storedCodeUnits, crossRef.PrimaryId, cancellationToken);
+            _logger.LogInformation("🏗️ STORE: Elasticsearch storage completed successfully");
 
             // 10. Update cross-reference with database IDs
+            _logger.LogInformation("🏗️ STORE: Updating cross-reference with database IDs...");
             crossRef.SqlId = designerOutput.Id;
             await _crossReferenceService.UpdateCrossReferenceAsync(crossRef.PrimaryId, crossRef, cancellationToken);
+            _logger.LogInformation("🏗️ STORE: Cross-reference update completed successfully");
 
             // 11. Generate and send CodeUnitAssignmentMessages to CUCS
+            _logger.LogInformation("🏗️ STORE: Generating and sending CodeUnitAssignmentMessages to CUCS queue...");
             var assignmentResult = await GenerateAndSendCodeUnitAssignmentsAsync(
                 storedCodeUnits, storedFunctionSpecs, context, cancellationToken);
+            _logger.LogInformation("🏗️ STORE: CUCS message sending completed - {Sent} assignments sent, {Errors} errors", 
+                assignmentResult.assignmentsSent, assignmentResult.errors.Count);
 
             storageResult.Success = true;
             storageResult.CodeUnitAssignmentsSent = assignmentResult.assignmentsSent;
             
-            _logger.LogInformation("Successfully stored designer output: {FunctionSpecs} function specs, {CodeUnits} code units, {Assignments} CUCS assignments sent", 
+            _logger.LogInformation("🏗️ STORE SUCCESS: Designer output stored successfully! {FunctionSpecs} function specs, {CodeUnits} code units, {Assignments} CUCS assignments sent", 
                 storageResult.FunctionSpecificationsStored, storageResult.CodeUnitsStored, storageResult.CodeUnitAssignmentsSent);
 
             return storageResult;
@@ -248,6 +277,10 @@ public class DesignerOutputStorageService : IDesignerOutputStorageService
 
         try
         {
+            _logger.LogInformation("🔍 PARSE START: Parsing function specifications from designer output (Length: {Length})", markdownOutput.Length);
+            _logger.LogInformation("🔍 PARSE: Designer output preview: {Preview}...", 
+                markdownOutput.Length > 500 ? markdownOutput.Substring(0, 500) + "..." : markdownOutput);
+
             // Use LLM to extract structured function specifications from markdown
             var extractionPrompt = $@"Extract function specifications from the following designer output. 
 Return a JSON array of function specifications with the following structure:
@@ -274,6 +307,8 @@ Return a JSON array of function specifications with the following structure:
 Designer Output:
 {markdownOutput}";
 
+            _logger.LogInformation("🔍 PARSE: Making LLM API call to extract function specifications...");
+
             var response = await _llmService.GenerateResponseAsync(
                 "You are a technical analyst specializing in extracting structured data from technical specifications.",
                 extractionPrompt,
@@ -281,70 +316,116 @@ Designer Output:
                 0.1f,
                 cancellationToken);
 
-            if (response.Success && !string.IsNullOrEmpty(response.Content))
+            _logger.LogInformation("🔍 PARSE: LLM response received - Success: {Success}, Content Length: {Length}", 
+                response.Success, response.Content?.Length ?? 0);
+
+            if (!response.Success)
             {
-                // Try to extract JSON from the response
-                var jsonMatch = Regex.Match(response.Content, @"\[.*\]", RegexOptions.Singleline);
-                if (jsonMatch.Success)
+                _logger.LogError("🔍 PARSE ERROR: LLM API call failed - {ErrorMessage}", response.ErrorMessage);
+                return functionSpecs;
+            }
+
+            if (string.IsNullOrEmpty(response.Content))
+            {
+                _logger.LogError("🔍 PARSE ERROR: LLM returned empty content");
+                return functionSpecs;
+            }
+
+            _logger.LogInformation("🔍 PARSE: LLM response preview: {Preview}...", 
+                response.Content.Length > 1000 ? response.Content.Substring(0, 1000) + "..." : response.Content);
+
+            // Try to extract JSON from the response
+            var jsonMatch = Regex.Match(response.Content, @"\[.*\]", RegexOptions.Singleline);
+            _logger.LogInformation("🔍 PARSE: JSON regex match successful: {Success}", jsonMatch.Success);
+
+            if (!jsonMatch.Success)
+            {
+                _logger.LogError("🔍 PARSE ERROR: No JSON array found in LLM response. Full response: {Response}", response.Content);
+                return functionSpecs;
+            }
+
+            var functionsJson = jsonMatch.Value;
+            _logger.LogInformation("🔍 PARSE: Extracted JSON (Length: {Length}): {Json}", 
+                functionsJson.Length, functionsJson.Length > 2000 ? functionsJson.Substring(0, 2000) + "..." : functionsJson);
+
+            List<Dictionary<string, object>>? parsedFunctions = null;
+            
+            try
+            {
+                parsedFunctions = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(functionsJson);
+                _logger.LogInformation("🔍 PARSE: JSON deserialization successful - Found {Count} functions", parsedFunctions?.Count ?? 0);
+            }
+            catch (JsonException jsonEx)
+            {
+                _logger.LogError(jsonEx, "🔍 PARSE ERROR: JSON deserialization failed. JSON: {Json}", functionsJson);
+                return functionSpecs;
+            }
+            
+            if (parsedFunctions == null || !parsedFunctions.Any())
+            {
+                _logger.LogError("🔍 PARSE ERROR: Deserialized functions is null or empty");
+                return functionSpecs;
+            }
+
+            _logger.LogInformation("🔍 PARSE: Processing {Count} parsed functions...", parsedFunctions.Count);
+
+            foreach (var func in parsedFunctions)
+            {
+                _logger.LogDebug("🔍 PARSE: Processing function with keys: {Keys}", string.Join(", ", func.Keys));
+                
+                var spec = new ParsedFunctionSpecification();
+                
+                if (func.TryGetValue("functionName", out var name))
+                    spec.FunctionName = name.ToString() ?? "";
+                if (func.TryGetValue("codeUnit", out var unit))
+                    spec.CodeUnit = unit.ToString() ?? "";
+                if (func.TryGetValue("namespace", out var ns))
+                    spec.Namespace = ns.ToString();
+                if (func.TryGetValue("signature", out var sig))
+                    spec.Signature = sig.ToString() ?? "";
+                if (func.TryGetValue("description", out var desc))
+                    spec.Description = desc.ToString() ?? "";
+                if (func.TryGetValue("inputParameters", out var input))
+                    spec.InputParameters = input.ToString();
+                if (func.TryGetValue("returnType", out var ret))
+                    spec.ReturnType = ret.ToString();
+                if (func.TryGetValue("dependencies", out var deps))
+                    spec.Dependencies = deps.ToString();
+                if (func.TryGetValue("businessLogic", out var logic))
+                    spec.BusinessLogic = logic.ToString();
+                if (func.TryGetValue("validationRules", out var validation))
+                    spec.ValidationRules = validation.ToString();
+                if (func.TryGetValue("errorHandling", out var error))
+                    spec.ErrorHandling = error.ToString();
+                if (func.TryGetValue("performanceRequirements", out var perf))
+                    spec.PerformanceRequirements = perf.ToString();
+                if (func.TryGetValue("securityConsiderations", out var security))
+                    spec.SecurityConsiderations = security.ToString();
+                if (func.TryGetValue("testCases", out var tests))
+                    spec.TestCases = tests.ToString();
+                if (func.TryGetValue("complexityRating", out var complexity) && int.TryParse(complexity.ToString(), out var complexityInt))
+                    spec.ComplexityRating = complexityInt;
+                if (func.TryGetValue("estimatedMinutes", out var minutes) && int.TryParse(minutes.ToString(), out var minutesInt))
+                    spec.EstimatedMinutes = minutesInt;
+                if (func.TryGetValue("priority", out var priority))
+                    spec.Priority = priority.ToString() ?? "Medium";
+                
+                if (!string.IsNullOrEmpty(spec.FunctionName))
                 {
-                    var functionsJson = jsonMatch.Value;
-                    var parsedFunctions = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(functionsJson);
-                    
-                    if (parsedFunctions != null)
-                    {
-                        foreach (var func in parsedFunctions)
-                        {
-                            var spec = new ParsedFunctionSpecification();
-                            
-                            if (func.TryGetValue("functionName", out var name))
-                                spec.FunctionName = name.ToString() ?? "";
-                            if (func.TryGetValue("codeUnit", out var unit))
-                                spec.CodeUnit = unit.ToString() ?? "";
-                            if (func.TryGetValue("namespace", out var ns))
-                                spec.Namespace = ns.ToString();
-                            if (func.TryGetValue("signature", out var sig))
-                                spec.Signature = sig.ToString() ?? "";
-                            if (func.TryGetValue("description", out var desc))
-                                spec.Description = desc.ToString() ?? "";
-                            if (func.TryGetValue("inputParameters", out var input))
-                                spec.InputParameters = input.ToString();
-                            if (func.TryGetValue("returnType", out var ret))
-                                spec.ReturnType = ret.ToString();
-                            if (func.TryGetValue("dependencies", out var deps))
-                                spec.Dependencies = deps.ToString();
-                            if (func.TryGetValue("businessLogic", out var logic))
-                                spec.BusinessLogic = logic.ToString();
-                            if (func.TryGetValue("validationRules", out var validation))
-                                spec.ValidationRules = validation.ToString();
-                            if (func.TryGetValue("errorHandling", out var error))
-                                spec.ErrorHandling = error.ToString();
-                            if (func.TryGetValue("performanceRequirements", out var perf))
-                                spec.PerformanceRequirements = perf.ToString();
-                            if (func.TryGetValue("securityConsiderations", out var security))
-                                spec.SecurityConsiderations = security.ToString();
-                            if (func.TryGetValue("testCases", out var tests))
-                                spec.TestCases = tests.ToString();
-                            if (func.TryGetValue("complexityRating", out var complexity) && int.TryParse(complexity.ToString(), out var complexityInt))
-                                spec.ComplexityRating = complexityInt;
-                            if (func.TryGetValue("estimatedMinutes", out var minutes) && int.TryParse(minutes.ToString(), out var minutesInt))
-                                spec.EstimatedMinutes = minutesInt;
-                            if (func.TryGetValue("priority", out var priority))
-                                spec.Priority = priority.ToString() ?? "Medium";
-                            
-                            if (!string.IsNullOrEmpty(spec.FunctionName))
-                            {
-                                functionSpecs.Add(spec);
-                            }
-                        }
-                    }
+                    _logger.LogInformation("🔍 PARSE: Successfully parsed function: {FunctionName} in {CodeUnit}", spec.FunctionName, spec.CodeUnit);
+                    functionSpecs.Add(spec);
+                }
+                else
+                {
+                    _logger.LogWarning("🔍 PARSE: Skipping function with empty name. Keys: {Keys}", string.Join(", ", func.Keys));
                 }
             }
 
-            _logger.LogInformation("Parsed {Count} function specifications from designer output", functionSpecs.Count);
+            _logger.LogInformation("🔍 PARSE SUCCESS: Parsed {Count} function specifications from designer output", functionSpecs.Count);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to parse function specifications from markdown output");
+            _logger.LogError(ex, "🔍 PARSE CRITICAL ERROR: Failed to parse function specifications from markdown output");
         }
 
         return functionSpecs;
@@ -600,6 +681,21 @@ Designer Output:
         var assignmentsSent = 0;
         var errors = new List<string>();
 
+        _logger.LogInformation("🔥 GENERATING ASSIGNMENTS: {CodeUnitCount} code units, {FunctionSpecCount} function specs", 
+            codeUnits?.Count ?? 0, functionSpecs?.Count ?? 0);
+
+        if (codeUnits == null || !codeUnits.Any())
+        {
+            _logger.LogWarning("⚠️ No code units provided to GenerateAndSendCodeUnitAssignmentsAsync");
+            return (0, errors);
+        }
+
+        if (functionSpecs == null || !functionSpecs.Any()) 
+        {
+            _logger.LogWarning("⚠️ No function specifications provided to GenerateAndSendCodeUnitAssignmentsAsync");
+            return (0, errors);
+        }
+
         try
         {
             foreach (var codeUnit in codeUnits)
@@ -661,18 +757,21 @@ Designer Output:
                 };
 
                 // Send to CUCS queue
+                _logger.LogInformation("🚀 Attempting to send CodeUnitAssignment for {CodeUnit} with {FunctionCount} functions", 
+                    codeUnit.Name, functionAssignments.Count);
+                
                 var success = await _messageCoordinatorService.SendCodeUnitAssignmentAsync(
                     assignment, cancellationToken);
 
                 if (success)
                 {
                     assignmentsSent++;
-                    _logger.LogInformation("Sent CodeUnitAssignment for {CodeUnit} with {FunctionCount} functions to CUCS queue",
+                    _logger.LogInformation("✅ Successfully sent CodeUnitAssignment for {CodeUnit} with {FunctionCount} functions to CUCS queue",
                         codeUnit.Name, functionAssignments.Count);
                 }
                 else
                 {
-                    var error = $"Failed to send CodeUnitAssignment for {codeUnit.Name} to CUCS queue";
+                    var error = $"❌ Failed to send CodeUnitAssignment for {codeUnit.Name} to CUCS queue";
                     errors.Add(error);
                     _logger.LogError(error);
                 }

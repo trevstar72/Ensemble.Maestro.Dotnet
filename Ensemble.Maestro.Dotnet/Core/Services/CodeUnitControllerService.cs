@@ -29,23 +29,41 @@ public class CodeUnitControllerService
 
     public async Task ProcessCodeUnitAssignmentAsync(CodeUnitAssignmentMessage assignment)
     {
+        _logger.LogInformation("🚀 CUCS ProcessCodeUnitAssignmentAsync ENTRY - CodeUnit: {CodeUnitName}, ID: {CodeUnitId}", 
+            assignment?.Name ?? "NULL", assignment?.CodeUnitId ?? "NULL");
+        
         try
         {
-            _logger.LogInformation("🔧 CUCS Processing CodeUnit assignment: {CodeUnitName} with {FunctionCount} functions",
-                assignment.Name, assignment.Functions?.Count ?? 0);
+            if (assignment == null)
+            {
+                _logger.LogError("🚨 CUCS ProcessCodeUnitAssignmentAsync received NULL assignment - this should never happen!");
+                return;
+            }
+            
+            _logger.LogInformation("🔧 CUCS Processing CodeUnit assignment: {CodeUnitName} with {FunctionCount} functions, Assignment ID: {AssignmentId}",
+                assignment.Name, assignment.Functions?.Count ?? 0, assignment.AssignmentId);
+            
+            _logger.LogInformation("🔍 CUCS Assignment Details - Priority: {Priority}, Target Language: {Language}, Due: {DueAt}", 
+                assignment.Priority, assignment.TargetLanguage, assignment.DueAt);
 
             if (assignment.Functions == null || assignment.Functions.Count == 0)
             {
-                _logger.LogWarning("No functions found in CodeUnit assignment: {CodeUnitName}", assignment.Name);
+                _logger.LogWarning("⚠️ CUCS No functions found in CodeUnit assignment: {CodeUnitName} - notifying builder", assignment.Name);
                 await NotifyBuilderIfQueueEmpty(assignment.CodeUnitId, assignment.Name);
                 return;
             }
 
+            _logger.LogInformation("📋 CUCS Function list for {CodeUnitName}: [{Functions}]", assignment.Name, 
+                string.Join(", ", assignment.Functions.Select(f => $"{f.FunctionName}(complexity:{f.ComplexityRating})")));
+
             // Track active jobs for this project/codeunit
             var jobKey = $"{assignment.CodeUnitId}:{assignment.Name}";
+            _logger.LogInformation("🔒 CUCS Setting up job tracking with key: {JobKey} for {FunctionCount} functions", jobKey, assignment.Functions.Count);
+            
             lock (_lockObject)
             {
                 _activeJobs[jobKey] = assignment.Functions.Count;
+                _logger.LogDebug("🔒 CUCS Job count set to {JobCount} for key {JobKey}", assignment.Functions.Count, jobKey);
             }
 
             // Process each function individually
@@ -74,98 +92,130 @@ public class CodeUnitControllerService
 
     private async Task ProcessFunctionAsync(string projectId, string codeUnitName, FunctionAssignmentMessage function, string jobKey)
     {
+        _logger.LogInformation("🔧 CUCS ProcessFunctionAsync ENTRY - Function: {FunctionName}, CodeUnit: {CodeUnitName}, JobKey: {JobKey}", 
+            function?.FunctionName ?? "NULL", codeUnitName ?? "NULL", jobKey ?? "NULL");
+        
         try
         {
+            if (function == null)
+            {
+                _logger.LogError("🚨 CUCS ProcessFunctionAsync received NULL function - this should never happen!");
+                return;
+            }
+            
+            _logger.LogInformation("📝 CUCS Function details - Name: {FunctionName}, Signature: {Signature}, Complexity: {Complexity}, Priority: {Priority}", 
+                function.FunctionName, function.Signature, function.ComplexityRating, function.Priority);
+            
             // Determine the appropriate MethodAgent type based on function characteristics
+            _logger.LogInformation("🎯 CUCS Determining MethodAgent type for function: {FunctionName}", function.FunctionName);
             var agentType = DetermineMethodAgentType(function);
+            _logger.LogInformation("✅ CUCS Determined MethodAgent type: {AgentType} for function: {FunctionName}", agentType, function.FunctionName);
             
             // Create job packet for the MethodAgent
+            _logger.LogInformation("📦 CUCS Creating job packet for function: {FunctionName}", function.FunctionName);
             var jobPacket = CreateJobPacket(projectId, codeUnitName, function);
+            _logger.LogInformation("✅ CUCS Created job packet - JobId: {JobId}, Priority: {Priority}, Context keys: [{ContextKeys}]", 
+                jobPacket.JobId, jobPacket.Priority, string.Join(", ", jobPacket.Context?.Keys ?? Enumerable.Empty<string>()));
             
             // Spawn and execute the MethodAgent
-            var methodAgent = _agentFactory.CreateAgent(agentType) as IMethodAgent;
+            _logger.LogInformation("🏭 CUCS Calling AgentFactory.CreateAgent for type: {AgentType}", agentType);
+            var agent = _agentFactory.CreateAgent(agentType);
+            _logger.LogInformation("🔍 CUCS AgentFactory returned agent: {AgentType} (IsNull: {IsNull})", 
+                agent?.GetType().Name ?? "NULL", agent == null);
+                
+            var methodAgent = agent as IMethodAgent;
+            _logger.LogInformation("🔄 CUCS Cast to IMethodAgent: {MethodAgentType} (IsNull: {IsNull})", 
+                methodAgent?.GetType().Name ?? "NULL", methodAgent == null);
+                
             if (methodAgent == null)
             {
-                throw new InvalidOperationException($"Failed to create MethodAgent of type: {agentType}");
+                var errorMsg = $"Failed to create MethodAgent of type: {agentType} - AgentFactory returned: {agent?.GetType().Name ?? "NULL"}";
+                _logger.LogError("❌ CUCS {ErrorMessage}", errorMsg);
+                throw new InvalidOperationException(errorMsg);
             }
 
-            _logger.LogInformation("⚡ CUCS Spawning {AgentType} for function: {FunctionName} (complexity: {Complexity})", 
+            _logger.LogInformation("⚡ CUCS Successfully created {AgentType} for function: {FunctionName} (complexity: {Complexity})", 
                 agentType, function.FunctionName, function.ComplexityRating);
             
             // Execute the agent with the job packet
+            _logger.LogInformation("🚀 CUCS Executing MethodAgent.ExecuteAsync for function: {FunctionName} with JobId: {JobId}", 
+                function.FunctionName, jobPacket.JobId);
             var result = await methodAgent.ExecuteAsync(jobPacket);
+            _logger.LogInformation("✅ CUCS MethodAgent.ExecuteAsync completed for function: {FunctionName} - Success: {Success}, Output length: {OutputLength}", 
+                function.FunctionName, result?.Success ?? false, result?.OutputResponse?.Length ?? 0);
             
             // Store the individual code document result
+            _logger.LogInformation("💾 CUCS Calling StoreCodeDocument for function: {FunctionName}", function.FunctionName);
             await StoreCodeDocument(projectId, codeUnitName, function.FunctionName ?? "Unknown", result);
             
-            _logger.LogInformation("✅ CUCS Completed function: {FunctionName} in CodeUnit: {CodeUnitName}", 
+            _logger.LogInformation("✅ CUCS ProcessFunctionAsync COMPLETED successfully for function: {FunctionName} in CodeUnit: {CodeUnitName}", 
                 function.FunctionName, codeUnitName);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing function: {FunctionName} in CodeUnit: {CodeUnitName}", 
-                function.FunctionName, codeUnitName);
+            _logger.LogError(ex, "💥 CUCS ProcessFunctionAsync EXCEPTION processing function: {FunctionName} in CodeUnit: {CodeUnitName} - Exception: {ExceptionType}, Message: {ExceptionMessage}, Stack: {StackTrace}", 
+                function?.FunctionName ?? "NULL", codeUnitName, ex.GetType().Name, ex.Message, ex.StackTrace);
             
             // Send function-specific error to Builder queue
+            _logger.LogInformation("📤 CUCS Sending BuilderErrorMessage for failed function: {FunctionName}", function?.FunctionName);
             await _messageCoordinator.SendBuilderErrorAsync(new BuilderErrorMessage
             {
                 ProjectId = projectId,
                 CodeUnitName = codeUnitName,
-                FunctionName = function.FunctionName,
+                FunctionName = function?.FunctionName,
                 ErrorType = "FunctionProcessingError",
-                ErrorMessage = $"Failed to process function {function.FunctionName}: {ex.Message}",
+                ErrorMessage = $"Failed to process function {function?.FunctionName}: {ex.Message}",
                 Severity = 6
             });
+            _logger.LogInformation("✅ CUCS Sent BuilderErrorMessage for function: {FunctionName}", function?.FunctionName);
         }
         finally
         {
             // Decrement active job count and check if queue is empty
+            _logger.LogInformation("🔻 CUCS ProcessFunctionAsync FINALLY block - calling DecrementJobCountAndCheckQueue for function: {FunctionName}, JobKey: {JobKey}", 
+                function?.FunctionName ?? "NULL", jobKey);
             await DecrementJobCountAndCheckQueue(jobKey, projectId, codeUnitName);
         }
     }
 
     private string DetermineMethodAgentType(FunctionAssignmentMessage function)
     {
-        // Mechanical algorithm to determine agent type based on function characteristics
-        // No AI involved - pure algorithmic decision making
+        _logger.LogInformation("🎯 CUCS DetermineMethodAgentType ENTRY - analyzing function: {FunctionName}", function?.FunctionName ?? "NULL");
         
-        // Determine agent type based on function characteristics from FunctionAssignmentMessage
-        var signature = function.Signature?.ToLower() ?? "";
-        var description = function.Description?.ToLower() ?? "";
+        // For now, all method agents use the same MethodAgent type
+        // The complexity and characteristics are passed in the job packet context
+        // Future enhancement: Create specialized method agent types as needed
+        var agentType = "MethodAgent";
         
-        if (signature.Contains("async") || signature.Contains("task"))
-        {
-            if (function.ComplexityRating > 5)
-                return "ComplexAsyncMethodAgent";
-            return "AsyncMethodAgent";
-        }
-        
-        if (signature.Contains("task"))
-            return "TaskMethodAgent";
-        
-        if (function.ComplexityRating > 8)
-            return "ComplexMethodAgent";
-        
-        if (signature.Contains("static"))
-            return "StaticMethodAgent";
-        
-        if (signature.Contains("private"))
-            return "PrivateMethodAgent";
-        
-        // Default method agent
-        return "StandardMethodAgent";
+        _logger.LogInformation("🎯 CUCS DetermineMethodAgentType determined type: {AgentType} for function: {FunctionName} (complexity: {Complexity})", 
+            agentType, function?.FunctionName ?? "NULL", function?.ComplexityRating ?? 0);
+            
+        return agentType;
     }
 
     private MethodJobPacket CreateJobPacket(string projectId, string codeUnitName, FunctionAssignmentMessage function)
     {
-        return new MethodJobPacket
+        _logger.LogInformation("📦 CUCS CreateJobPacket ENTRY - ProjectId: {ProjectId}, CodeUnit: {CodeUnitName}, Function: {FunctionName}", 
+            projectId ?? "NULL", codeUnitName ?? "NULL", function?.FunctionName ?? "NULL");
+        
+        var jobId = Guid.NewGuid().ToString("N");
+        var priority = CalculatePriority(function);
+        
+        _logger.LogInformation("📦 CUCS Creating JobPacket - JobId: {JobId}, Priority: {Priority}, Complexity: {Complexity}", 
+            jobId, priority, function?.ComplexityRating ?? 0);
+        
+        var functionSpec = ConvertToFunctionSpec(function);
+        _logger.LogInformation("📦 CUCS Created FunctionSpec - Name: {Name}, ReturnType: {ReturnType}, IsAsync: {IsAsync}, IsStatic: {IsStatic}", 
+            functionSpec.Name, functionSpec.ReturnType, functionSpec.IsAsync, functionSpec.IsStatic);
+        
+        var jobPacket = new MethodJobPacket
         {
-            JobId = Guid.NewGuid().ToString("N"),
+            JobId = jobId,
             ProjectId = projectId,
             CodeUnitName = codeUnitName,
-            Function = ConvertToFunctionSpec(function),
+            Function = functionSpec,
             CreatedAt = DateTime.UtcNow,
-            Priority = CalculatePriority(function),
+            Priority = priority,
             Context = new Dictionary<string, object>
             {
                 ["codeUnitName"] = codeUnitName,
@@ -173,6 +223,11 @@ public class CodeUnitControllerService
                 ["functionComplexity"] = function.ComplexityRating
             }
         };
+        
+        _logger.LogInformation("✅ CUCS CreateJobPacket COMPLETED - JobId: {JobId}, Context keys: [{ContextKeys}]", 
+            jobPacket.JobId, string.Join(", ", jobPacket.Context.Keys));
+            
+        return jobPacket;
     }
 
     private int CalculatePriority(FunctionAssignmentMessage function)
@@ -254,24 +309,48 @@ public class CodeUnitControllerService
 
     private async Task DecrementJobCountAndCheckQueue(string jobKey, string projectId, string codeUnitName)
     {
+        _logger.LogInformation("🔻 CUCS DecrementJobCountAndCheckQueue ENTRY - JobKey: {JobKey}, ProjectId: {ProjectId}, CodeUnit: {CodeUnitName}", 
+            jobKey ?? "NULL", projectId ?? "NULL", codeUnitName ?? "NULL");
+        
         bool isQueueEmpty = false;
+        int remainingJobs = 0;
         
         lock (_lockObject)
         {
             if (_activeJobs.ContainsKey(jobKey))
             {
+                var previousCount = _activeJobs[jobKey];
                 _activeJobs[jobKey]--;
+                remainingJobs = _activeJobs[jobKey];
+                
+                _logger.LogInformation("🔻 CUCS Job count decremented for {JobKey}: {PreviousCount} → {RemainingJobs}", 
+                    jobKey, previousCount, remainingJobs);
+                
                 if (_activeJobs[jobKey] <= 0)
                 {
                     _activeJobs.Remove(jobKey);
                     isQueueEmpty = true;
+                    _logger.LogInformation("🏁 CUCS Queue is now EMPTY for JobKey: {JobKey} - removed from active jobs", jobKey);
                 }
+                else
+                {
+                    _logger.LogInformation("⏳ CUCS Queue still has {RemainingJobs} jobs remaining for JobKey: {JobKey}", remainingJobs, jobKey);
+                }
+            }
+            else
+            {
+                _logger.LogWarning("⚠️ CUCS JobKey {JobKey} not found in active jobs dictionary - this may indicate a tracking issue", jobKey);
             }
         }
         
         if (isQueueEmpty)
         {
+            _logger.LogInformation("🚀 CUCS Queue empty detected - calling NotifyBuilderIfQueueEmpty for CodeUnit: {CodeUnitName}", codeUnitName);
             await NotifyBuilderIfQueueEmpty(projectId, codeUnitName);
+        }
+        else
+        {
+            _logger.LogInformation("⏳ CUCS Not notifying Builder - queue still has jobs remaining for CodeUnit: {CodeUnitName}", codeUnitName);
         }
     }
 

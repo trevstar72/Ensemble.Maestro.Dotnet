@@ -251,10 +251,7 @@ public class MaestroDbContext : DbContext
                   .HasForeignKey(e => e.CrossReferenceId)
                   .OnDelete(DeleteBehavior.Restrict);
             
-            entity.HasOne(e => e.Project)
-                  .WithMany()
-                  .HasForeignKey(e => e.ProjectId)
-                  .OnDelete(DeleteBehavior.Cascade);
+            // Project relationship removed for MVP - ProjectId is nullable
         });
 
         // Configure FunctionSpecification entity
@@ -275,26 +272,11 @@ public class MaestroDbContext : DbContext
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
             entity.Property(e => e.UpdatedAt).HasDefaultValueSql("GETUTCDATE()");
             
-            // Configure relationships - use NoAction to avoid cascade conflicts
+            // Configure relationships - only CrossReference FK is maintained for MVP
             entity.HasOne(e => e.CrossReference)
                   .WithMany()
                   .HasForeignKey(e => e.CrossReferenceId)
                   .OnDelete(DeleteBehavior.Restrict);
-            
-            entity.HasOne(e => e.Project)
-                  .WithMany()
-                  .HasForeignKey(e => e.ProjectId)
-                  .OnDelete(DeleteBehavior.NoAction);
-                  
-            entity.HasOne(e => e.PipelineExecution)
-                  .WithMany()
-                  .HasForeignKey(e => e.PipelineExecutionId)
-                  .OnDelete(DeleteBehavior.NoAction);
-                  
-            entity.HasOne(e => e.AgentExecution)
-                  .WithMany()
-                  .HasForeignKey(e => e.AgentExecutionId)
-                  .OnDelete(DeleteBehavior.NoAction);
         });
 
         // Configure CodeUnit entity

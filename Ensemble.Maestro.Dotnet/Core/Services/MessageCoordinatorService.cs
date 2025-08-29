@@ -276,8 +276,13 @@ public class MessageCoordinatorService : IMessageCoordinatorService
 
             if (result.Success)
             {
-                _logger.LogInformation("Sent code unit assignment {AssignmentId} for {Name} ({FunctionCount} functions)", 
+                _logger.LogInformation("✅ Sent code unit assignment {AssignmentId} for {Name} ({FunctionCount} functions)", 
                     assignment.AssignmentId, assignment.Name, assignment.Functions.Count);
+            }
+            else
+            {
+                _logger.LogError("❌ Failed to send code unit assignment {AssignmentId} for {Name} - Error: {ErrorMessage}", 
+                    assignment.AssignmentId, assignment.Name, result.ErrorMessage ?? "Unknown error");
             }
 
             return result.Success;

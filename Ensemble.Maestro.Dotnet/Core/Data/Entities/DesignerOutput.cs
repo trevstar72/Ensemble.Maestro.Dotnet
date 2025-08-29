@@ -19,22 +19,19 @@ public class DesignerOutput
     public Guid CrossReferenceId { get; set; }
     
     /// <summary>
-    /// Project this output belongs to
+    /// Project this output belongs to (nullable for MVP)
     /// </summary>
-    [ForeignKey(nameof(Project))]
-    public Guid ProjectId { get; set; }
+    public Guid? ProjectId { get; set; }
     
     /// <summary>
-    /// Pipeline execution that created this output
+    /// Pipeline execution that created this output (nullable for MVP)
     /// </summary>
-    [ForeignKey(nameof(PipelineExecution))]
-    public Guid PipelineExecutionId { get; set; }
+    public Guid? PipelineExecutionId { get; set; }
     
     /// <summary>
-    /// Agent execution that created this output
+    /// Agent execution that created this output (nullable for MVP)
     /// </summary>
-    [ForeignKey(nameof(AgentExecution))]
-    public Guid AgentExecutionId { get; set; }
+    public Guid? AgentExecutionId { get; set; }
     
     /// <summary>
     /// Type of designer agent that created this
@@ -231,9 +228,7 @@ public class DesignerOutput
     
     // Navigation properties
     public virtual CrossReferenceEntity? CrossReference { get; set; }
-    public virtual Project? Project { get; set; }
-    public virtual PipelineExecution? PipelineExecution { get; set; }
-    public virtual AgentExecution? AgentExecution { get; set; }
+    // Project, PipelineExecution and AgentExecution navigation removed for MVP - relationships should be many-to-many via tracking tables
     
     /// <summary>
     /// Function specifications extracted from this designer output

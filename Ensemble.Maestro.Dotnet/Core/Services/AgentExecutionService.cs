@@ -2,6 +2,7 @@ using Ensemble.Maestro.Dotnet.Core.Agents;
 using Ensemble.Maestro.Dotnet.Core.Data.Entities;
 using Ensemble.Maestro.Dotnet.Core.Data.Repositories;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Ensemble.Maestro.Dotnet.Core.Services;
 
@@ -120,6 +121,21 @@ public class AgentExecutionService
             // Update pipeline function counts
             await UpdatePipelineFunctionCounts(pipelineExecutionId, result.Success);
             
+            // Hook: Process Designer output to extract function specifications for swarm architecture
+            _logger.LogInformation("🔍 Checking ProcessDesignerOutputAsync hook conditions: Success={Success}, AgentType={AgentType}, HasOutput={HasOutput}", 
+                result.Success, agentType, !string.IsNullOrEmpty(result.OutputResponse));
+            
+            if (result.Success && agentType == "Designer" && !string.IsNullOrEmpty(result.OutputResponse))
+            {
+                _logger.LogInformation("✅ ProcessDesignerOutputAsync hook conditions met - triggering hook for {AgentType}", agentType);
+                await ProcessDesignerOutputAsync(agentExecution, result, context, cancellationToken);
+            }
+            else
+            {
+                _logger.LogInformation("❌ ProcessDesignerOutputAsync hook conditions NOT met - Success={Success}, AgentType={AgentType}, HasOutput={HasOutput}", 
+                    result.Success, agentType, !string.IsNullOrEmpty(result.OutputResponse));
+            }
+            
             _logger.LogInformation("Agent execution completed: {AgentType} for {ExecutionId} with status {Status}",
                 agentType, agentExecution.Id, agentExecution.Status);
             
@@ -229,5 +245,57 @@ public class AgentExecutionService
         
         await pipelineRepository.UpdateAsync(pipeline);
         await pipelineRepository.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Process Designer output to extract function specifications for swarm architecture
+    /// </summary>
+    private async Task ProcessDesignerOutputAsync(
+        AgentExecution agentExecution, 
+        AgentExecutionResult result, 
+        AgentExecutionContext? baseContext,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            _logger.LogInformation("🔄 Processing Designer output for swarm architecture - extracting function specifications");
+
+            using var scope = _serviceScopeFactory.CreateScope();
+            var designerOutputStorage = scope.ServiceProvider.GetRequiredService<IDesignerOutputStorageService>();
+
+            // Create execution context from agent execution data
+            var context = baseContext ?? new AgentExecutionContext
+            {
+                ProjectId = agentExecution.ProjectId,
+                PipelineExecutionId = agentExecution.PipelineExecutionId ?? Guid.Empty,
+                StageExecutionId = agentExecution.StageExecutionId ?? Guid.Empty,
+                Stage = "Designing"
+            };
+
+            // Store and process the Designer output
+            var storageResult = await designerOutputStorage.StoreDesignerOutputAsync(
+                context,
+                result,
+                agentExecution.Id,
+                "Designer",
+                "System Designer",
+                cancellationToken);
+
+            if (storageResult.Success)
+            {
+                _logger.LogInformation("✅ Designer output processed successfully: {FunctionSpecs} function specs, {CodeUnits} code units, {Assignments} assignments sent to CUCS",
+                    storageResult.FunctionSpecificationsStored,
+                    storageResult.CodeUnitsStored, 
+                    storageResult.CodeUnitAssignmentsSent);
+            }
+            else
+            {
+                _logger.LogWarning("⚠️ Designer output processing failed: {Error}", storageResult.ErrorMessage);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ Error processing Designer output for swarm architecture");
+        }
     }
 }

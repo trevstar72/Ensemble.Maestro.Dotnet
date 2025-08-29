@@ -6,7 +6,8 @@ namespace Ensemble.Maestro.Dotnet.Api.Test;
 
 public class TestDesignerToCucsIntegrationRequest
 {
-    // Empty request for now - could add parameters later for different test scenarios
+    // FastEndpoints requires at least one public property for request binding
+    public string? TestId { get; set; }
 }
 
 public class TestDesignerToCucsIntegrationResponse

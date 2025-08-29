@@ -4,6 +4,7 @@ using Ensemble.Maestro.Dotnet.Core.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Ensemble.Maestro.Dotnet.Migrations
 {
     [DbContext(typeof(MaestroDbContext))]
-    partial class MaestroDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250829114217_RemoveDesignerOutputAgentExecutionFK")]
+    partial class RemoveDesignerOutputAgentExecutionFK
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -657,14 +660,14 @@ namespace Ensemble.Maestro.Dotnet.Migrations
                     b.Property<string>("PerformanceSpecs")
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<Guid?>("PipelineExecutionId")
+                    b.Property<Guid>("PipelineExecutionId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<string>("ProcessingStage")
                         .HasMaxLength(50)
                         .HasColumnType("nvarchar(50)");
 
-                    b.Property<Guid?>("ProjectId")
+                    b.Property<Guid>("ProjectId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<int>("QualityScore")
@@ -717,6 +720,8 @@ namespace Ensemble.Maestro.Dotnet.Migrations
                     b.HasIndex("CreatedAt");
 
                     b.HasIndex("CrossReferenceId");
+
+                    b.HasIndex("PipelineExecutionId");
 
                     b.HasIndex("ProjectId");
 
@@ -813,7 +818,7 @@ namespace Ensemble.Maestro.Dotnet.Migrations
                     b.Property<string>("PerformanceRequirements")
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<Guid?>("PipelineExecutionId")
+                    b.Property<Guid>("PipelineExecutionId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<string>("Priority")
@@ -821,7 +826,7 @@ namespace Ensemble.Maestro.Dotnet.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
 
-                    b.Property<Guid?>("ProjectId")
+                    b.Property<Guid>("ProjectId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<int?>("QualityScore")
@@ -1629,14 +1634,31 @@ namespace Ensemble.Maestro.Dotnet.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("Ensemble.Maestro.Dotnet.Core.Data.Entities.PipelineExecution", "PipelineExecution")
+                        .WithMany()
+                        .HasForeignKey("PipelineExecutionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Ensemble.Maestro.Dotnet.Core.Data.Entities.Project", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
                     b.Navigation("CrossReference");
+
+                    b.Navigation("PipelineExecution");
+
+                    b.Navigation("Project");
                 });
 
             modelBuilder.Entity("Ensemble.Maestro.Dotnet.Core.Data.Entities.FunctionSpecification", b =>
                 {
                     b.HasOne("Ensemble.Maestro.Dotnet.Core.Data.Entities.AgentExecution", "AgentExecution")
                         .WithMany()
-                        .HasForeignKey("AgentExecutionId");
+                        .HasForeignKey("AgentExecutionId")
+                        .OnDelete(DeleteBehavior.NoAction);
 
                     b.HasOne("Ensemble.Maestro.Dotnet.Core.Data.Entities.CodeUnit", null)
                         .WithMany("FunctionSpecifications")
@@ -1659,11 +1681,15 @@ namespace Ensemble.Maestro.Dotnet.Migrations
 
                     b.HasOne("Ensemble.Maestro.Dotnet.Core.Data.Entities.PipelineExecution", "PipelineExecution")
                         .WithMany()
-                        .HasForeignKey("PipelineExecutionId");
+                        .HasForeignKey("PipelineExecutionId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
 
                     b.HasOne("Ensemble.Maestro.Dotnet.Core.Data.Entities.Project", "Project")
                         .WithMany()
-                        .HasForeignKey("ProjectId");
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
 
                     b.Navigation("AgentExecution");
 

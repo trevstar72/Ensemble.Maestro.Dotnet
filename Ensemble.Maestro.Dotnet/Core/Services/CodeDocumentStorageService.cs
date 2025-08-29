@@ -2,6 +2,8 @@ using Microsoft.Extensions.Logging;
 using Ensemble.Maestro.Dotnet.Core.Agents;
 using System.Collections.Concurrent;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
+using Ensemble.Maestro.Dotnet.Core.Configuration;
 
 namespace Ensemble.Maestro.Dotnet.Core.Services;
 
@@ -12,13 +14,15 @@ namespace Ensemble.Maestro.Dotnet.Core.Services;
 public class CodeDocumentStorageService : ICodeDocumentStorageService
 {
     private readonly ILogger<CodeDocumentStorageService> _logger;
+    private readonly OutputPathsConfiguration _outputPaths;
     private readonly ConcurrentDictionary<string, List<CodeDocument>> _documentsByProject = new();
     private readonly ConcurrentDictionary<string, List<CodeDocument>> _documentsByCodeUnit = new();
     private readonly object _lockObject = new();
 
-    public CodeDocumentStorageService(ILogger<CodeDocumentStorageService> logger)
+    public CodeDocumentStorageService(ILogger<CodeDocumentStorageService> logger, IOptions<OutputPathsConfiguration> outputPaths)
     {
         _logger = logger;
+        _outputPaths = outputPaths.Value;
     }
 
     public async Task<string> StoreCodeDocumentAsync(string projectId, string codeUnitName, string functionName, 
@@ -56,8 +60,11 @@ public class CodeDocumentStorageService : ICodeDocumentStorageService
             _documentsByCodeUnit[codeUnitKey].Add(document);
         }
 
-        _logger.LogInformation("📄 Stored code document {DocumentId} for {CodeUnitName}.{FunctionName} ({Size} chars)",
+        _logger.LogInformation("📄 Stored MethodAgent code document {DocumentId} for {CodeUnitName}.{FunctionName} ({Size} chars)",
             document.Id, codeUnitName, functionName, document.Content.Length);
+
+        // Write individual method file for testing/debugging
+        await WriteIndividualMethodFileAsync(document, cancellationToken);
 
         return document.Id;
     }
@@ -290,6 +297,67 @@ public class {codeUnitName} {{
             "Python" => $"{codeUnitName}.py",
             "Java" => $"{codeUnitName}.java",
             _ => $"{codeUnitName}.txt"
+        };
+    }
+
+    /// <summary>
+    /// Write individual method file to filesystem for testing/logging
+    /// </summary>
+    private async Task WriteIndividualMethodFileAsync(CodeDocument document, CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Create ai-outputs directory if it doesn't exist using configured path
+            var outputDir = _outputPaths.AgentOutputsDirectory;
+            Directory.CreateDirectory(outputDir);
+            
+            // Generate unique filename for this method implementation
+            var timestamp = document.GeneratedAt.ToString("yyyyMMdd-HHmmss-fff");
+            var filename = $"ai-generated-MethodAgent-{document.CodeUnitName}-{document.FunctionName}-{timestamp}.{GetFileExtension(document.Language)}";
+            var filePath = Path.Combine(outputDir, filename);
+            
+            // Create content with metadata header (similar to LLMService format)
+            var fileContent = $@"# AI Generated Method Implementation
+**Agent:** MethodAgent  
+**Code Unit:** {document.CodeUnitName}  
+**Function:** {document.FunctionName}  
+**Language:** {document.Language}  
+**Generated:** {document.GeneratedAt:yyyy-MM-dd HH:mm:ss}  
+**Quality Score:** {document.QualityScore}  
+**Confidence Score:** {document.ConfidenceScore}  
+**Tokens Used:** {document.TokensUsed}  
+**Generation Cost:** ${document.GenerationCost:F4}  
+**Status:** {document.Status}  
+
+---
+
+{document.Content}
+";
+            
+            await File.WriteAllTextAsync(filePath, fileContent, cancellationToken);
+            
+            _logger.LogInformation("📁 Individual method file written: {FileName} ({Size} chars)", 
+                filename, fileContent.Length);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to write individual method file for {CodeUnit}.{Function}", 
+                document.CodeUnitName, document.FunctionName);
+        }
+    }
+
+    /// <summary>
+    /// Get file extension based on language
+    /// </summary>
+    private string GetFileExtension(string language)
+    {
+        return language switch
+        {
+            "CSharp" => "cs",
+            "TypeScript" => "ts", 
+            "Python" => "py",
+            "Java" => "java",
+            _ => "txt"
         };
     }
 }
